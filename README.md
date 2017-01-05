@@ -1,4 +1,4 @@
-# mpp_plotting
+# mpp-plotting
 
 This repository includes files that illustrate how to create plots in an MPP database such as HAWQ or GPDB. 
 
