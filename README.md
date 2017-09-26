@@ -1,6 +1,6 @@
 # mpp-plotting
 
-This repository includes files that illustrate how to create plots in an MPP database such as HAWQ or GPDB. 
+This repository includes files that illustrate how to create plots in an MPP database such as HAWQ or GPDB. I wrote a blog about this. It can be found [here](http://engineering.pivotal.io/post/mpp-plotting/).
 
 ## Files
 ### Notebooks
