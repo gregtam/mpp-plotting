@@ -21,12 +21,14 @@ def _add_weights_column(df_list, normed):
     for df in df_list:
         df['weights'] = _create_weight_percentage(df[['freq']], normed)
 
+
 def _create_weight_percentage(hist_col, normed=False):
     """Convert frequencies to percent."""
     if normed:
         return hist_col/hist_col.sum()
     else:
         return hist_col
+
 
 def _listify(df_list, labels):
     """If df_list and labels are DataFrames and strings respectively,
@@ -40,6 +42,7 @@ def _listify(df_list, labels):
         labels = [labels]
     return df_list, labels
 
+
 def _separate_schema_table(full_table_name, conn):
     """Separates schema name and table name."""
     if '.' in full_table_name:
@@ -48,6 +51,8 @@ def _separate_schema_table(full_table_name, conn):
         schema_name = psql.read_sql('SELECT current_schema();', conn).iloc[0, 0]
         table_name = full_table_name
         return schema_name, full_table_name
+
+
 
 def get_histogram_values(table_name, column_name, conn, nbins=25,
                          bin_width=None, cast_as=None, where_clause='',
