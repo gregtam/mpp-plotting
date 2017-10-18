@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from textwrap import dedent
 
@@ -10,6 +10,13 @@ import pandas as pd
 import pandas.io.sql as psql
 import psycopg2
 import seaborn as sns
+import sqlalchemy
+from sqlalchemy import create_engine, Column, MetaData, Table
+from sqlalchemy import all_, and_, any_, not_, or_
+from sqlalchemy import alias, between, case, cast, column, false, func,\
+                       intersect, literal, literal_column, select, text, true
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, Float,\
+                       Numeric, String
 
 import credentials
 
@@ -37,27 +44,34 @@ def _listify(df_list, labels):
     built to handle multiple variables.
     """
 
-    if str(type(df_list)) == "<class 'pandas.core.frame.DataFrame'>":
+    if isinstance(df_list, pd.DataFrame):
         df_list = [df_list]
-    if type(labels) == "<type 'str'>":
+    if isinstance(labels, str):
         labels = [labels]
     return df_list, labels
 
 
-def _separate_schema_table(full_table_name, conn):
-    """Separates schema name and table name."""
+def _separate_schema_table(full_table_name, con):
+    """Separates schema name and table name.
+    
+    Inputs:
+    full_table_name - Schema and table name together joined by a '.'
+    con - A SQLAlchemy engine or psycopg2 connection object
+    """
     if '.' in full_table_name:
         return full_table_name.split('.')
     else:
-        schema_name = psql.read_sql('SELECT current_schema();', conn).iloc[0, 0]
+        if isinstance(con, psycopg2.extensions.connection):
+            schema_name = psql.read_sql('SELECT current_schema();', con).iloc[0, 0]
+        elif isinstance(con, sqlalchemy.engine.base.Engine):
+            schema_name = con.execute(text('SELECT current_schema();')).scalar()
         table_name = full_table_name
         return schema_name, full_table_name
 
 
 
-def get_histogram_values(table_name, column_name, conn, nbins=25,
-                         bin_width=None, cast_as=None, where_clause='',
-                         print_query=False):
+def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
+                         bin_width=None, cast_as=None, print_query=False):
     """Takes a SQL table and creates histogram bin heights. Relevant
     parameters are either the number of bins or the width of each bin.
     Only one of these is specified. The other one must be left at its
@@ -68,10 +82,10 @@ def get_histogram_values(table_name, column_name, conn, nbins=25,
                  the schema name prepended, with a '.', e.g.,
                  'schema_name.table_name'
     column_name - Name of the column of interest
-    conn - A psycopg2 connection object
+    con - A SQLAlchemy engine or psycopg2 connection object
     nbins - Number of desired bins (Default: 25)
     bin_width - Width of each bin (Default: None)
-    cast_as - SQL type to cast as
+    cast_as - SQL type to cast as (string or SQLAlchemy data type)
     where_clause - A SQL where clause specifying any filters
     print_query - If True, print the resulting query.
     """
@@ -86,11 +100,9 @@ def get_histogram_values(table_name, column_name, conn, nbins=25,
         if bin_width is not None and bin_width < 0:
             raise Exception('bin_width must be positive.')
     
-    def _get_column_information(full_table_name, column_name, conn):
+    def _get_column_information(full_table_name, column_name, con):
         """Get column name and data type information."""
-        schema_name, table_name =  _separate_schema_table(full_table_name,
-                                                          conn
-                                                         )
+        schema_name, table_name =  _separate_schema_table(full_table_name, con)
 
         sql = '''
         SELECT column_name, data_type
@@ -98,35 +110,24 @@ def get_histogram_values(table_name, column_name, conn, nbins=25,
          WHERE table_schema = '{schema_name}'
            AND table_name = '{table_name}'
            AND column_name = '{column_name}'
-        '''.format(schema_name=schema_name,
-                   table_name=table_name,
-                   column_name=column_name
-                  )
+        '''.format(**locals())
         
-        return psql.read_sql(sql, conn)
+        return psql.read_sql(sql, con)
     
-    def _is_column_category(table_name, column_name, info_df):
+    def _is_category_column(table_obj, column_name):
         """Returns whether the column is a category."""
-        if column_name in info_df['column_name'].tolist():
-            if cast_as is None:
-                # If it's text type, return True
-                return (info_df[info_df.column_name == column_name]['data_type'] == 'text')[0]
-            elif cast_as.upper() in ['TIMESTAMP', 'DATE', 'INT', 'FLOAT', 'NUMERIC']:
-                # If we want to cast it to a number
-                return False
-            else:
-                return True
-        else:
-            raise Exception('{} is not found in the table {}'
-                                .format(column_name, table_name))
 
-    def _is_time_type(table_name, column_name, info_df):
+        data_type = str(table_obj.c[column_name].type)
+        numeric_types = ['DATE', 'DOUBLE PRECISION', 'INT', 'FLOAT',
+                         'NUMERIC', 'TIMESTAMP',
+                         'TIMESTAMP WITHOUT TIME ZONE']
+        return data_type not in numeric_types
+
+    def _is_time_type(table_obj, column_name):
         """Returns whether the column is a time type (date or timestamp)."""
-        if column_name in info_df['column_name'].tolist():
-            return (info_df[info_df.column_name == column_name]['data_type']
-                        .isin(['date', 'timestamp']))[0]
-        else:
-            raise Exception(column_name + ' is not found in the table ' + table_name)
+        data_type = str(table_obj.c[column_name].type)
+        time_types = ['DATE', 'TIMESTAMP', 'TIMESTAMP WITHOUT TIME ZONE']
+        return data_type in time_types
 
     def _get_cast_string(cast_as):
         """If cast_as is specified, we must create a cast string to
@@ -138,123 +139,112 @@ def get_histogram_values(table_name, column_name, conn, nbins=25,
         else:
             return '::' + cast_as.upper()
 
-    def _min_max_value(column_name, conn):
-        sql = '''
-        SELECT MIN({col_name}{cast_as}), MAX({col_name}{cast_as})
-          FROM {table_name}
-         {where_clause};
-        '''.format(col_name = column_name,
-                   cast_as = cast_string,
-                   table_name = table_name,
-                   where_clause = where_clause
+    def _min_max_value(table_obj, column_name, con, cast_as=None):
+        desired_col = column(column_name)
+        if cast_as is not None:
+            desired_col = desired_col.cast(cast_as)
+
+        min_max_sql =\
+            select([func.min(desired_col), func.max(desired_col)],
+                   from_obj=table_obj
                   )
-        return tuple(psql.read_sql(sql, conn).iloc[0])
+
+        return tuple(psql.read_sql(min_max_sql, con).iloc[0])
     
     _check_for_input_errors(nbins, bin_width)
-    info_df = _get_column_information(table_name, column_name, conn)
-    is_time_type = _is_time_type(table_name, column_name, info_df)
-    is_category = _is_column_category(table_name, column_name, info_df)
-    cast_string = _get_cast_string(cast_as)
+    # info_df = _get_column_information(table_name, column_name, con)
+    is_category = _is_category_column(table_obj, column_name)
+    is_time_type = _is_time_type(table_obj, column_name)
+    # cast_string = _get_cast_string(cast_as)
 
     if is_category:
-        sql = '''
-        SELECT {column_name} AS category, COUNT(*) AS freq
-          FROM {table_name}
-         GROUP BY {column_name}
-         ORDER BY COUNT(*) DESC;
-        '''.format(column_name=column_name, table_name=table_name)
+        sql =\
+            select([column(column_name).label('category'),
+                    func.count('*').label('freq')
+                   ],
+                   from_obj=table_obj
+                  )\
+            .group_by(column_name)\
+            .order_by(column('freq').desc())
     elif is_time_type:
         # Get min and max value of the column
-        min_val, max_val = _min_max_value(column_name, conn)
+        min_val, max_val = _min_max_value(table_obj, column_name, con)
+        col_val = column(column_name)
+        min_time = literal(min_val)
+        max_time = literal(max_val)
         
         # Get the span of the column
         span_value = max_val - min_val
         if bin_width is not None:
-            # If bin width is specified, calculate nbins
-            # from it.
+            # If bin width is specified, calculate nbins from it.
             nbins = span_value/bin_width
 
-        sql = '''
-          WITH min_max_table AS
-               (SELECT MIN({column_name}) AS min_val,
-                       MAX({column_name}) AS max_val
-                  FROM {table_name}
-                 {where_clause}
-               ),
-               binned_table AS
-               (SELECT FLOOR(EXTRACT(EPOCH FROM {column_name}::TIMESTAMP - min_val::TIMESTAMP)
-                             /EXTRACT(EPOCH FROM max_val::TIMESTAMP - min_val::TIMESTAMP)
-                             * {nbins}
-                            )
-                       /{nbins} * EXTRACT(EPOCH FROM max_val::TIMESTAMP - min_val::TIMESTAMP) * INTERVAL '1 SECOND'
-                       + min_val::TIMESTAMP AS bin_nbr
-                  FROM {table_name}
-                       CROSS JOIN min_max_table
-               )
-        SELECT bin_nbr, COUNT(*) AS freq
-          FROM binned_table
-         GROUP BY bin_nbr
-         ORDER BY bin_nbr;
-        '''.format(column_name = column_name,
-                   nbins = nbins,
-                   table_name = table_name,
-                   where_clause = where_clause
-                  )
+        print span_value, type(span_value)
 
+        # Get the SQL expressions for the time ranges
+        time_pos_numer = func.extract('EPOCH', col_val - max_time)
+        time_range_denom = func.extract('EPOCH', min_time - max_time)
+        # Which bin it should fall into
+        bin_nbr = func.floor(time_pos_numer/time_range_denom * nbins)
+        # Scale the bins to their proper size
+        bin_nbr_scaled = bin_nbr/nbins * time_range_denom
+        # Translate bins to their proper locations
+        bin_loc = bin_nbr_scaled * text("INTERVAL '1 second'") + min_time
+
+        binned_table =\
+            select([bin_loc.label('bin_loc'),
+                    func.count('*').label('freq')
+                   ], 
+                   from_obj=table_obj
+                  )\
+            .group_by('bin_loc')\
+            .order_by('bin_loc')
+
+        return psql.read_sql(binned_table, con)
+        
     else:
-        # Get min and max value of the column
-        min_val, max_val = _min_max_value(column_name, conn)
+        # Set column variables
+        min_val = column('min_val')
+        max_val = column('max_val')
+        col_val = column(column_name)
         
         # Get the span of the column
         span_value = max_val - min_val
         if bin_width is not None:
-            # If bin width is specified, calculate nbins
-            # from it.
+            # If bin width is specified, calculate nbins from it.
             nbins = span_value/bin_width
-        
-        # Form the SQL statement. We must be careful if the value is the
-        # maximum value within the column because it might end up in a
-        # bucket on its own since this is the only case where the floor
-        # function is exactly equal to 1.
-        sql = '''
-          WITH min_max_table AS
-               (SELECT MIN({column_name}{cast_as}) AS min_val,
-                       MAX({column_name}{cast_as}) AS max_val
-                  FROM {table_name}
-                 {where_clause}
-               ),
-               binned_table AS
-               (SELECT CASE WHEN {column_name}{cast_as} < max_val
-                                 THEN FLOOR(({column_name}{cast_as} - min_val)::NUMERIC
-                                            /(max_val - min_val)
-                                            * {nbins}
-                                           )
-                                      /{nbins} * (max_val - min_val) 
-                                      + min_val
-                            WHEN {column_name}{cast_as} = max_val
-                                 THEN ({nbins} - 1)::NUMERIC/{nbins} * (max_val - min_val) 
-                                      + min_val
-                            ELSE NULL
-                             END AS bin_nbr
-                  FROM {table_name}
-                       CROSS JOIN min_max_table
-                 {where_clause}
-               )
-        SELECT bin_nbr, COUNT(*) AS freq
-          FROM binned_table
-         GROUP BY bin_nbr
-         ORDER BY bin_nbr;
-        '''.format(column_name = column_name,
-                   cast_as = cast_string,
-                   nbins = nbins,
-                   table_name = table_name,
-                   where_clause = where_clause
-                  )
+
+        # Which bin it should fall into
+        bin_nbr =  func.floor((col_val - min_val)/span_value * nbins)
+        # Scale the bins to their proper size
+        bin_nbr_scaled = bin_nbr/nbins * span_value
+        # Translate bins to their proper locations
+        bin_loc = bin_nbr_scaled + min_val
+
+        min_max_tbl =\
+            select([func.min(column('x')).label('min_val'),
+                    func.max(column('y')).label('max_val')
+                   ],
+                   from_obj=table_obj
+                   )\
+            .alias('foo')
+
+        binned_table =\
+            select([bin_loc.label('bin_loc'),
+                    func.count('*').label('freq')
+                   ], 
+                   from_obj=[table_obj, min_max_tbl]
+                  )\
+            .group_by('bin_loc')\
+            .order_by('bin_loc')
+
+
+        return psql.read_sql(binned_table, con)
 
     if print_query:
         print dedent(sql)
 
-    return psql.read_sql(sql, conn)
+    return psql.read_sql(sql, con)
 
 
 def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
@@ -318,7 +308,7 @@ def get_roc_values(table_name, y_true, y_score, conn, print_query=False):
       FROM pre_roc
            CROSS JOIN class_sizes
      ORDER BY tpr, fpr;
-    '''.format(table_name=table_name, y_true=y_true, y_score=y_score)
+    '''.format(**locals())
 
     if print_query:
         print dedent(sql)
@@ -385,9 +375,9 @@ def get_scatterplot_values(table_name, column_name_x, column_name_y, conn,
     def _min_max_value(table_name, column_name, cast_as):
         """Get the min and max value of a specified column."""
         sql = '''
-        SELECT MIN({col_name}{cast_as}), MAX({col_name}{cast_as})
+        SELECT MIN({column_name}{cast_as}), MAX({column_name}{cast_as})
           FROM {table_name};
-        '''.format(col_name=column_name, table_name=table_name, cast_as=cast_as)
+        '''.format(**locals())
 
         return tuple(psql.read_sql(sql, conn).iloc[0])
      
@@ -919,7 +909,8 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     # If we are plotting NULLS and there are some, plot them and change xticks
     if null_at != '' and np.any(has_null):
         for i in range(num_hists):
-            plt.bar(null_bin_left[i], null_weights[i], null_bin_width, color=color_palette[i], hatch='x')
+            plt.bar(null_bin_left[i], null_weights[i], null_bin_width,
+                    color=color_palette[i], hatch='x')
         if data_type == 'numeric':
             _plot_null_xticks(null_at, bin_info, xticks)
         elif data_type == 'timestamp':
