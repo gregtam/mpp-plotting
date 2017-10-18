@@ -13,8 +13,9 @@ import seaborn as sns
 import sqlalchemy
 from sqlalchemy import create_engine, Column, MetaData, Table
 from sqlalchemy import all_, and_, any_, not_, or_
-from sqlalchemy import alias, between, case, cast, column, false, func,\
-                       intersect, literal, literal_column, select, text, true
+from sqlalchemy import alias, between, case, cast, column, distinct, false,\
+                       func, intersect, literal, literal_column, select, text,\
+                       true
 from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, Float,\
                        Numeric, String
 
@@ -61,16 +62,13 @@ def _separate_schema_table(full_table_name, con):
     if '.' in full_table_name:
         return full_table_name.split('.')
     else:
-        if isinstance(con, psycopg2.extensions.connection):
-            schema_name = psql.read_sql('SELECT current_schema();', con).iloc[0, 0]
-        elif isinstance(con, sqlalchemy.engine.base.Engine):
-            schema_name = con.execute(text('SELECT current_schema();')).scalar()
+        schema_name = con.execute(text('SELECT current_schema();')).scalar()
         table_name = full_table_name
         return schema_name, full_table_name
 
 
 
-def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
+def get_histogram_values(table_obj, column_name, engine, metadata, nbins=25,
                          bin_width=None, cast_as=None, print_query=False):
     """Takes a SQL table and creates histogram bin heights. Relevant
     parameters are either the number of bins or the width of each bin.
@@ -78,15 +76,12 @@ def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
     default value of 0 or it will throw an error.
     
     Inputs:
-    table_name - Name of the table in SQL. Input can also include have
-                 the schema name prepended, with a '.', e.g.,
-                 'schema_name.table_name'
+    table_obj - A SQLAlchemy Table or Select object
     column_name - Name of the column of interest
-    con - A SQLAlchemy engine or psycopg2 connection object
+    engine - A SQLAlchemy engine object
     nbins - Number of desired bins (Default: 25)
     bin_width - Width of each bin (Default: None)
     cast_as - SQL type to cast as (string or SQLAlchemy data type)
-    where_clause - A SQL where clause specifying any filters
     print_query - If True, print the resulting query.
     """
 
@@ -189,7 +184,7 @@ def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
                    ],
                    from_obj=table_obj
                    )\
-            .alias('foo')
+            .alias('min_max_table')
 
         # Group by the bin locations
         binned_table =\
@@ -204,7 +199,7 @@ def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
     if print_query:
         print binned_table
 
-    return psql.read_sql(binned_table, con)
+    return psql.read_sql(binned_table, engine)
 
 
 def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
@@ -228,52 +223,60 @@ def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
     return sum(avg_height * width)
 
 
-def get_roc_values(table_name, y_true, y_score, conn, print_query=False):
+def get_roc_values(table_obj, y_true, y_score, engine, print_query=False):
     """Computes the ROC curve in database.
 
     Inputs:
-    table_name - The name of the table that includes predicted and true
-                 values
+    table_obj - A SQLAlchemy Table or Select object
     y_true - The name of the column that contains the true values
     y_score - The name of the column that contains the scores of the
               machine learning algorithm
-    conn - A psycopg2 connection object
+    engine - A SQLAlchemy engine object
     print_query - If True, print the resulting query.
     """
 
-    sql = '''
-      WITH row_num_table AS
-           (SELECT row_number()
-                       OVER (ORDER BY {y_score}) AS row_num,
-                   *
-              FROM {table_name}
-           ),
-           pre_roc AS 
-           (SELECT *,
-                   SUM({y_true})
-                       OVER (ORDER BY {y_score} DESC) AS num_pos,
-                   SUM(1 - {y_true})
-                       OVER (ORDER BY {y_score} DESC) AS num_neg
-              FROM row_num_table
-           ),
-           class_sizes AS
-           (SELECT SUM({y_true}) AS tot_pos,
-                   SUM(1 - {y_true}) AS tot_neg
-              FROM {table_name}
-           )
-    SELECT DISTINCT
-           {y_score} AS thresholds,
-           num_pos/tot_pos::NUMERIC AS tpr,
-           num_neg/tot_neg::NUMERIC AS fpr
-      FROM pre_roc
-           CROSS JOIN class_sizes
-     ORDER BY tpr, fpr;
-    '''.format(**locals())
+    y_true_col = column('y_true')
+    y_score_col = column('y_score')
 
-    if print_query:
-        print dedent(sql)
+    row_nbr_tbl =\
+        select([func.row_number()
+                    .over(order_by=y_score_col)
+               ] + list(table_obj.c)
+              )\
+        .alias('row_nbr_tbl')
 
-    return psql.read_sql(sql, conn)
+    pre_roc_tbl =\
+        select(row_nbr_tbl.c
+               + [func.sum(y_true_col)
+                      .over(order_by=y_score_col.desc())
+                      .label('num_pos'),
+                  func.sum(1 - y_true_col)
+                      .over(order_by=y_score_col.desc())
+                      .label('num_neg')
+                 ]
+              )\
+        .alias('pre_roc_tbl')
+
+    class_sizes_tbl =\
+        select([func.sum(y_true_col).label('tot_pos'),
+                func.sum(1 - y_true_col).label('tot_neg')
+               ],
+               from_obj=table_obj
+              )\
+        .alias('class_sizes_tbl')
+
+    roc_tbl =\
+        select([distinct(y_score_col).label('thresholds'),
+                (column('num_pos')/column('tot_pos').cast(Numeric))
+                    .label('tpr'),
+                (column('num_neg')/column('tot_neg').cast(Numeric))
+                    .label('fpr')
+               ],
+               from_obj=[pre_roc_tbl, class_sizes_tbl]
+              )\
+        .order_by(column('tpr'), column('fpr'))
+
+    return psql.read_sql(roc_tbl, engine)
 
 
 def get_scatterplot_values(table_name, column_name_x, column_name_y, conn,
