@@ -203,7 +203,7 @@ def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
         return psql.read_sql(binned_table, con)
         
     else:
-        # Set column variables
+        # Get min and max value of the column
         min_val = column('min_val')
         max_val = column('max_val')
         col_val = column(column_name)
@@ -215,15 +215,20 @@ def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
             nbins = span_value/bin_width
 
         # Which bin it should fall into
-        bin_nbr =  func.floor((col_val - min_val)/span_value * nbins)
+        bin_nbr = func.floor((col_val - min_val)/span_value * nbins)
+        # Group max value into the last bin. It would otherwise be in a
+        # separate bin on its own
+        bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
+                               else_=bin_nbr-1
+                              )
         # Scale the bins to their proper size
-        bin_nbr_scaled = bin_nbr/nbins * span_value
+        bin_nbr_scaled = bin_nbr_correct/nbins * span_value
         # Translate bins to their proper locations
         bin_loc = bin_nbr_scaled + min_val
 
         min_max_tbl =\
-            select([func.min(column('x')).label('min_val'),
-                    func.max(column('y')).label('max_val')
+            select([func.min(column(column_name)).label('min_val'),
+                    func.max(column(column_name)).label('max_val')
                    ],
                    from_obj=table_obj
                    )\
@@ -237,7 +242,6 @@ def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
                   )\
             .group_by('bin_loc')\
             .order_by('bin_loc')
-
 
         return psql.read_sql(binned_table, con)
 
