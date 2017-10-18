@@ -100,20 +100,6 @@ def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
         if bin_width is not None and bin_width < 0:
             raise Exception('bin_width must be positive.')
     
-    def _get_column_information(full_table_name, column_name, con):
-        """Get column name and data type information."""
-        schema_name, table_name =  _separate_schema_table(full_table_name, con)
-
-        sql = '''
-        SELECT column_name, data_type
-          FROM information_schema.columns
-         WHERE table_schema = '{schema_name}'
-           AND table_name = '{table_name}'
-           AND column_name = '{column_name}'
-        '''.format(**locals())
-        
-        return psql.read_sql(sql, con)
-    
     def _is_category_column(table_obj, column_name):
         """Returns whether the column is a category."""
 
@@ -129,90 +115,8 @@ def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
         time_types = ['DATE', 'TIMESTAMP', 'TIMESTAMP WITHOUT TIME ZONE']
         return data_type in time_types
 
-    def _get_cast_string(cast_as):
-        """If cast_as is specified, we must create a cast string to
-        recast our columns. If not, we set it as a blank string.
-        """
-
-        if cast_as is None:
-            return ''
-        else:
-            return '::' + cast_as.upper()
-
-    def _min_max_value(table_obj, column_name, con, cast_as=None):
-        desired_col = column(column_name)
-        if cast_as is not None:
-            desired_col = desired_col.cast(cast_as)
-
-        min_max_sql =\
-            select([func.min(desired_col), func.max(desired_col)],
-                   from_obj=table_obj
-                  )
-
-        return tuple(psql.read_sql(min_max_sql, con).iloc[0])
-    
-    _check_for_input_errors(nbins, bin_width)
-    # info_df = _get_column_information(table_name, column_name, con)
-    is_category = _is_category_column(table_obj, column_name)
-    is_time_type = _is_time_type(table_obj, column_name)
-    # cast_string = _get_cast_string(cast_as)
-
-    if is_category:
-        sql =\
-            select([column(column_name).label('category'),
-                    func.count('*').label('freq')
-                   ],
-                   from_obj=table_obj
-                  )\
-            .group_by(column_name)\
-            .order_by(column('freq').desc())
-    elif is_time_type:
-        # Get min and max value of the column
-        min_val, max_val = _min_max_value(table_obj, column_name, con)
-        col_val = column(column_name)
-        min_time = literal(min_val)
-        max_time = literal(max_val)
-        
-        # Get the span of the column
-        span_value = max_val - min_val
-        if bin_width is not None:
-            # If bin width is specified, calculate nbins from it.
-            nbins = span_value/bin_width
-
-        print span_value, type(span_value)
-
-        # Get the SQL expressions for the time ranges
-        time_pos_numer = func.extract('EPOCH', col_val - max_time)
-        time_range_denom = func.extract('EPOCH', min_time - max_time)
-        # Which bin it should fall into
-        bin_nbr = func.floor(time_pos_numer/time_range_denom * nbins)
-        # Scale the bins to their proper size
-        bin_nbr_scaled = bin_nbr/nbins * time_range_denom
-        # Translate bins to their proper locations
-        bin_loc = bin_nbr_scaled * text("INTERVAL '1 second'") + min_time
-
-        binned_table =\
-            select([bin_loc.label('bin_loc'),
-                    func.count('*').label('freq')
-                   ], 
-                   from_obj=table_obj
-                  )\
-            .group_by('bin_loc')\
-            .order_by('bin_loc')
-
-        return psql.read_sql(binned_table, con)
-        
-    else:
-        # Get min and max value of the column
-        min_val = column('min_val')
-        max_val = column('max_val')
-        col_val = column(column_name)
-        
-        # Get the span of the column
-        span_value = max_val - min_val
-        if bin_width is not None:
-            # If bin width is specified, calculate nbins from it.
-            nbins = span_value/bin_width
+    def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
+        """Gets the bin locations for a numeric type."""
 
         # Which bin it should fall into
         bin_nbr = func.floor((col_val - min_val)/span_value * nbins)
@@ -226,14 +130,68 @@ def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
         # Translate bins to their proper locations
         bin_loc = bin_nbr_scaled + min_val
 
+        return bin_loc
+
+    def _get_bin_locs_time(nbins, col_val, min_val, max_val):
+        """Gets the bin locations for a time type."""
+
+        # Get the SQL expressions for the time ranges
+        time_pos_numer = func.extract('EPOCH', col_val - max_val)
+        time_range_denom = func.extract('EPOCH', min_val - max_val)
+        # Which bin it should fall into
+        bin_nbr = func.floor(time_pos_numer/time_range_denom * nbins)
+        # Group max value into the last bin. It would otherwise be in a
+        # separate bin on its own
+        bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
+                               else_=bin_nbr-1
+                              )
+        # Scale the bins to their proper size
+        bin_nbr_scaled = bin_nbr_correct/nbins * time_range_denom
+        # Translate bins to their proper locations
+        bin_loc = bin_nbr_scaled * text("INTERVAL '1 second'") + min_val
+
+        return bin_loc
+
+    _check_for_input_errors(nbins, bin_width)
+    is_category = _is_category_column(table_obj, column_name)
+    is_time_type = _is_time_type(table_obj, column_name)
+
+    if is_category:
+        binned_table =\
+            select([column(column_name).label('category'),
+                    func.count('*').label('freq')
+                   ],
+                   from_obj=table_obj
+                  )\
+            .group_by(column_name)\
+            .order_by(column('freq').desc())
+    else:
+        # Get column variables
+        min_val = column('min_val')
+        max_val = column('max_val')
+        col_val = column(column_name)
+        
+        # Get the span of the column
+        span_value = max_val - min_val
+        if bin_width is not None:
+            # If bin width is specified, calculate nbins from it.
+            nbins = span_value/bin_width
+
+        if is_time_type:
+            bin_loc = _get_bin_locs_time(nbins, col_val, min_val, max_val)
+        else:
+            bin_loc = _get_bin_locs_numeric(nbins, col_val, min_val, max_val)
+
+        # Table to get min and max value
         min_max_tbl =\
-            select([func.min(column(column_name)).label('min_val'),
-                    func.max(column(column_name)).label('max_val')
+            select([func.min(column(column_name)).label(min_val.name),
+                    func.max(column(column_name)).label(max_val.name)
                    ],
                    from_obj=table_obj
                    )\
             .alias('foo')
 
+        # Group by the bin locations
         binned_table =\
             select([bin_loc.label('bin_loc'),
                     func.count('*').label('freq')
@@ -243,12 +201,10 @@ def get_histogram_values(table_obj, column_name, con, metadata, nbins=25,
             .group_by('bin_loc')\
             .order_by('bin_loc')
 
-        return psql.read_sql(binned_table, con)
-
     if print_query:
-        print dedent(sql)
+        print binned_table
 
-    return psql.read_sql(sql, con)
+    return psql.read_sql(binned_table, con)
 
 
 def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
