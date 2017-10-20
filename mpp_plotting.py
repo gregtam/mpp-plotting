@@ -279,10 +279,10 @@ def get_roc_values(table_obj, y_true, y_score, engine, print_query=False):
     return psql.read_sql(roc_tbl, engine)
 
 
-def get_scatterplot_values(table_name, column_name_x, column_name_y, conn,
+def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
                            nbins=(1000, 1000), bin_size=None, cast_x_as=None,
                            cast_y_as=None, print_query=False):
-    """ Takes a SQL table and creates scatter plot bin values. This is
+    """Takes a SQL table and creates scatter plot bin values. This is
     the 2D version of get_histogram_values. Relevant parameters are
     either the number of bins or the size of each bin in both the x and
     y direction. Only number of bins or size of the bins is specified.
@@ -290,12 +290,10 @@ def get_scatterplot_values(table_name, column_name_x, column_name_y, conn,
     throw an error.
     
     Inputs:
-    table_name - Name of the table in SQL. Input can also include have
-                 the schema name prepended, with a '.', e.g.,
-                 'schema_name.table_name'
+    table_obj - A SQLAlchemy Table or Select object
     column_name_x - Name of one column of interest to be plotted
     column_name_y - Name of another column of interest to be plotted
-    conn - A psycopg2 connection object
+    engine - A SQLAlchemy engine object
     column_name - Name of the column of interest
     nbins - Number of desired bins for x and y directions
             (Default: (0, 0))
