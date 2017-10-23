@@ -21,7 +21,6 @@ from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, Float,\
 
 import credentials
 
-
 def _add_weights_column(df_list, normed):
     """Add the weights column for each DataFrame in a list of
     DataFrames.
@@ -37,6 +36,82 @@ def _create_weight_percentage(hist_col, normed=False):
         return hist_col/hist_col.sum()
     else:
         return hist_col
+
+
+def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
+    """Gets the bin locations for a numeric type."""
+
+    # Which bin it should fall into
+    numer = (col_val - min_val).cast(Numeric)
+    denom = (max_val - min_val).cast(Numeric)
+    bin_nbr = func.floor(numer/denom * nbins)
+    # Group max value into the last bin. It would otherwise be in a
+    # separate bin on its own.
+    bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
+                           else_=bin_nbr - 1
+                          )
+    # Scale the bins to their proper size
+    bin_nbr_scaled = bin_nbr_correct/nbins * (max_val - min_val)
+    # Translate bins to their proper locations
+    bin_loc = bin_nbr_scaled + min_val
+
+    return bin_loc
+
+
+def _get_bin_locs_time(nbins, col_val, min_val, max_val):
+    """Gets the bin locations for a time type."""
+
+    # Get the SQL expressions for the time ranges
+    numer = func.extract('EPOCH', col_val - max_val).cast(Numeric)
+    denom = func.extract('EPOCH', min_val - max_val).cast(Numeric)
+
+    # Which bin it should fall into
+    bin_nbr = func.floor(numer/denom * nbins)
+    # Group max value into the last bin. It would otherwise be in a
+    # separate bin on its own
+    bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
+                           else_=bin_nbr - 1
+                          )
+    # Scale the bins to their proper size
+    bin_nbr_scaled = bin_nbr_correct/nbins * time_range_denom
+    # Translate bins to their proper locations
+    bin_loc = bin_nbr_scaled * text("INTERVAL '1 second'") + min_val
+
+    return bin_loc
+
+
+def _get_min_max_table(table_obj, column_name, alias_name, min_val_name,
+                       max_val_name):
+    """Returns a SQLAlchemy table that captures the min and max values
+    of a column.
+    """
+
+    min_max_tbl =\
+        select([func.min(column(column_name)).label(min_val_name),
+                func.max(column(column_name)).label(max_val_name)
+               ],
+               from_obj=table_obj
+               )\
+        .alias(alias_name)
+
+    return min_max_tbl
+
+
+def _is_category_column(table_obj, column_name):
+    """Returns whether the column is a category."""
+
+    data_type = str(table_obj.c[column_name].type)
+    numeric_types = ['BIGINT', 'DATE', 'DOUBLE PRECISION', 'INT',
+                     'INTEGER', 'FLOAT', 'NUMERIC', 'TIMESTAMP',
+                     'TIMESTAMP WITHOUT TIME ZONE']
+    return data_type not in numeric_types
+
+
+def _is_time_type(table_obj, column_name):
+    """Returns whether the column is a time type (date or timestamp)."""
+    data_type = str(table_obj.c[column_name].type)
+    time_types = ['DATE', 'TIMESTAMP', 'TIMESTAMP WITHOUT TIME ZONE']
+    return data_type in time_types
 
 
 def _listify(df_list, labels):
@@ -68,7 +143,7 @@ def _separate_schema_table(full_table_name, con):
 
 
 
-def get_histogram_values(table_obj, column_name, engine, metadata, nbins=25,
+def get_histogram_values(table_obj, column_name, engine, nbins=25,
                          bin_width=None, cast_as=None, print_query=False):
     """Takes a SQL table and creates histogram bin heights. Relevant
     parameters are either the number of bins or the width of each bin.
@@ -94,58 +169,6 @@ def get_histogram_values(table_obj, column_name, engine, metadata, nbins=25,
             raise Exception('nbins must be positive.')
         if bin_width is not None and bin_width < 0:
             raise Exception('bin_width must be positive.')
-    
-    def _is_category_column(table_obj, column_name):
-        """Returns whether the column is a category."""
-
-        data_type = str(table_obj.c[column_name].type)
-        numeric_types = ['DATE', 'DOUBLE PRECISION', 'INT', 'FLOAT',
-                         'NUMERIC', 'TIMESTAMP',
-                         'TIMESTAMP WITHOUT TIME ZONE']
-        return data_type not in numeric_types
-
-    def _is_time_type(table_obj, column_name):
-        """Returns whether the column is a time type (date or timestamp)."""
-        data_type = str(table_obj.c[column_name].type)
-        time_types = ['DATE', 'TIMESTAMP', 'TIMESTAMP WITHOUT TIME ZONE']
-        return data_type in time_types
-
-    def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
-        """Gets the bin locations for a numeric type."""
-
-        # Which bin it should fall into
-        bin_nbr = func.floor((col_val - min_val)/span_value * nbins)
-        # Group max value into the last bin. It would otherwise be in a
-        # separate bin on its own
-        bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
-                               else_=bin_nbr-1
-                              )
-        # Scale the bins to their proper size
-        bin_nbr_scaled = bin_nbr_correct/nbins * span_value
-        # Translate bins to their proper locations
-        bin_loc = bin_nbr_scaled + min_val
-
-        return bin_loc
-
-    def _get_bin_locs_time(nbins, col_val, min_val, max_val):
-        """Gets the bin locations for a time type."""
-
-        # Get the SQL expressions for the time ranges
-        time_pos_numer = func.extract('EPOCH', col_val - max_val)
-        time_range_denom = func.extract('EPOCH', min_val - max_val)
-        # Which bin it should fall into
-        bin_nbr = func.floor(time_pos_numer/time_range_denom * nbins)
-        # Group max value into the last bin. It would otherwise be in a
-        # separate bin on its own
-        bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
-                               else_=bin_nbr-1
-                              )
-        # Scale the bins to their proper size
-        bin_nbr_scaled = bin_nbr_correct/nbins * time_range_denom
-        # Translate bins to their proper locations
-        bin_loc = bin_nbr_scaled * text("INTERVAL '1 second'") + min_val
-
-        return bin_loc
 
     _check_for_input_errors(nbins, bin_width)
     is_category = _is_category_column(table_obj, column_name)
@@ -159,32 +182,29 @@ def get_histogram_values(table_obj, column_name, engine, metadata, nbins=25,
                    from_obj=table_obj
                   )\
             .group_by(column_name)\
-            .order_by(column('freq').desc())
+            .order_by(column_name)
     else:
         # Get column variables
         min_val = column('min_val')
         max_val = column('max_val')
         col_val = column(column_name)
         
-        # Get the span of the column
-        span_value = max_val - min_val
+        # Table to get min and max value
+        min_max_tbl = _get_min_max_table(table_obj,
+                                         column_name,
+                                         'min_max_table',
+                                         min_val.name,
+                                         max_val.name
+                                        )
+
         if bin_width is not None:
-            # If bin width is specified, calculate nbins from it.
-            nbins = span_value/bin_width
+            # If bin width is not specified, calculate nbins from it.
+            nbins = (max_val - min_val)/bin_width
 
         if is_time_type:
             bin_loc = _get_bin_locs_time(nbins, col_val, min_val, max_val)
         else:
             bin_loc = _get_bin_locs_numeric(nbins, col_val, min_val, max_val)
-
-        # Table to get min and max value
-        min_max_tbl =\
-            select([func.min(column(column_name)).label(min_val.name),
-                    func.max(column(column_name)).label(max_val.name)
-                   ],
-                   from_obj=table_obj
-                   )\
-            .alias('min_max_table')
 
         # Group by the bin locations
         binned_table =\
@@ -315,135 +335,186 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
             if nbins[0] < 0 or nbins[1] < 0:
                 raise Exception('Number of bin dimensions must both be positive')
     
-    def _get_cast_string(cast_as_x, cast_as_y):
-        """If cast_as_x and/or cast_as_y are specified, we must create a
-        cast string to recast our columns. If not, we set it as a blank
-        string.
-        """
+    # def _min_max_value(table_name, column_name, cast_as):
+    #     """Get the min and max value of a specified column."""
+    #     sql = '''
+    #     SELECT MIN({column_name}{cast_as}), MAX({column_name}{cast_as})
+    #       FROM {table_name};
+    #     '''.format(**locals())
 
-        if cast_x_as is None:
-            cast_x_string = ''
-        else:
-            cast_x_string = '::' + cast_x_as.upper()
-            
-        if cast_y_as is None:
-            cast_y_string = ''
-        else:
-            cast_y_string = '::' + cast_y_as.upper()
-
-        return cast_x_string, cast_y_string
-
-    def _min_max_value(table_name, column_name, cast_as):
-        """Get the min and max value of a specified column."""
-        sql = '''
-        SELECT MIN({column_name}{cast_as}), MAX({column_name}{cast_as})
-          FROM {table_name};
-        '''.format(**locals())
-
-        return tuple(psql.read_sql(sql, conn).iloc[0])
+    #     return tuple(psql.read_sql(sql, conn).iloc[0])
      
 
-    schema_name, table_name = _separate_schema_table(table_name, conn)
     _check_for_input_errors(nbins, bin_size)
-    cast_x_string, cast_y_string = _get_cast_string(cast_x_as, cast_y_as)
+    is_category_x = _is_category_column(table_obj, column_name_x)
+    is_category_y = _is_category_column(table_obj, column_name_y)
+    is_time_type_x = _is_time_type(table_obj, column_name_x)
+    is_time_type_y = _is_time_type(table_obj, column_name_y)
 
     # Get the min and max values for x and y directions
-    min_val_x, max_val_x = _min_max_value(table_name,
-                                          column_name_x,
-                                          cast_as=cast_x_string
-                                         )
-    min_val_y, max_val_y = _min_max_value(table_name,
-                                          column_name_y,
-                                          cast_as=cast_y_string
-                                         )
+    # min_val_x, max_val_x = _min_max_value(table_name,
+    #                                       column_name_x,
+    #                                       cast_as=cast_x_string
+    #                                      )
+    # min_val_y, max_val_y = _min_max_value(table_name,
+    #                                       column_name_y,
+    #                                       cast_as=cast_y_string
+    #                                      )
+
+    if is_category_x and is_category_y:
+        binned_table =\
+            select([column(column_name_x).label('category_x'),
+                    column(column_name_y).label('category_y'),
+                    func.count('*').label('freq')
+                   ],
+                   from_obj=table_obj
+                   )\
+            .group_by(column_name_x, column_name_y)\
+            .order_by(column_name_x, column_name_y)
+
+    elif not is_category_x and not is_category_y:
+        min_val_x = column('min_val_x')
+        max_val_x = column('max_val_x')
+        col_val_x = column(column_name_x)
+
+        min_val_y = column('min_val_y')
+        max_val_y = column('max_val_y')
+        col_val_y = column(column_name_x)
+
+        min_max_tbl_x = _get_min_max_table(table_obj,
+                                           column_name_x,
+                                           'min_max_table_x',
+                                           min_val_x.name,
+                                           max_val_x.name
+                                          )
+        min_max_tbl_y = _get_min_max_table(table_obj,
+                                           column_name_y,
+                                           'min_max_table_y',
+                                           min_val_y.name,
+                                           max_val_y.name
+                                          )
+
+        if bin_size is not None:
+            # If bin size is not specified, calculated nbins_x and
+            # nbins_y from it.
+            nbins[0] = (max_val_x - min_val_x)/bin_size[0]
+            nbins[1] = (may_val_y - min_val_y)/bin_size[1]
+
+        if is_time_type_x:
+            bin_loc_x = _get_bin_locs_time(nbins[0], col_val_x,
+                                           min_val_x, max_val_x)
+        else:
+            bin_loc_x = _get_bin_locs_numeric(nbins[0], col_val_x,
+                                              min_val_x, max_val_x)
+
+        if is_time_type_y:
+            bin_loc_y = _get_bin_locs_time(nbins[1], col_val_y,
+                                           min_val_y, max_val_y)
+        else:
+            bin_loc_y = _get_bin_locs_numeric(nbins[1], col_val_y,
+                                              min_val_y, max_val_y)
+
+        binned_table =\
+            select([bin_loc_x.label('bin_loc_x'),
+                    bin_loc_y.label('bin_loc_y'),
+                    func.count('*').label('freq')
+                   ],
+                   from_obj=[table_obj, min_max_tbl_x, min_max_tbl_y]
+                   )\
+            .group_by('bin_loc_x', 'bin_loc_y')\
+            .order_by('bin_loc_x', 'bin_loc_y')
+
+        # binned_table =\
+        #     select([bin_loc_x.label('bin_loc_x'),
+        #             func.count('*').label('freq')
+        #            ],
+        #            from_obj=[table_obj, min_max_tbl_x]
+        #            )\
+        #     .group_by('bin_loc_x')\
+        #     .order_by('bin_loc_x')
+
+    return psql.read_sql(binned_table, engine)
     
-    # Get the span of values in the x and y direction
-    span_values = (max_val_x - min_val_x, max_val_y - min_val_y)
-    
-    # Since the bins are generated using nbins, if only bin_size is
-    # specified, we can back calculate the number of bins that will be
-    # used.
-    if bin_size is not None:
-        nbins = [float(i)/j for i, j in zip(span_values, bin_size)]
+    # sql = '''
+    # DROP TABLE IF EXISTS binned_table_temp;
+    # CREATE TABLE binned_table_temp
+    #    AS SELECT FLOOR(({x_col}{cast_x_as} - {min_val_x})
+    #                          /({max_val_x} - {min_val_x}) 
+    #                          * {nbins_x}
+    #                     )
 
-    sql = '''
-    DROP TABLE IF EXISTS binned_table_temp;
-    CREATE TABLE binned_table_temp
-       AS SELECT FLOOR(({x_col}{cast_x_as} - {min_val_x})
-                             /({max_val_x} - {min_val_x}) 
-                             * {nbins_x}
-                        )
-                       /{nbins_x} * ({max_val_x} - {min_val_x}) 
-                       + {min_val_x} AS bin_nbr_x,
-                   FLOOR(({y_col}{cast_y_as} - {min_val_y})
-                             /({max_val_y} - {min_val_y}) 
-                             * {nbins_y}
-                        )
-                       /{nbins_y} * ({max_val_y} - {min_val_y}) 
-                       + {min_val_y} AS bin_nbr_y
-              FROM {table_name}
-             WHERE {x_col} IS NOT NULL
-               AND {y_col} IS NOT NULL;
 
-    DROP TABLE IF EXISTS scatter_bins_temp;
-    CREATE TABLE scatter_bins_temp
-       AS SELECT *
-              FROM (SELECT x::NUMERIC/{nbins_x} * ({max_val_x} - {min_val_x})
-                               + {min_val_x} AS scat_bin_x
-                     FROM generate_series(1, {nbins_x}) AS x
-                   ) AS foo_x
-                   CROSS JOIN (SELECT y::NUMERIC/{nbins_y} * ({max_val_y} - {min_val_y})
-                                          + {min_val_y} AS scat_bin_y
-                                 FROM generate_series(1, {nbins_y}) AS y 
-                              ) AS foo_y;
+    #                    /{nbins_x} * ({max_val_x} - {min_val_x}) 
+    #                    + {min_val_x} AS bin_nbr_x,
+    #                FLOOR(({y_col}{cast_y_as} - {min_val_y})
+    #                          /({max_val_y} - {min_val_y}) 
+    #                          * {nbins_y}
+    #                     )
+    #                    /{nbins_y} * ({max_val_y} - {min_val_y}) 
+    #                    + {min_val_y} AS bin_nbr_y
+    #           FROM {table_name}
+    #          WHERE {x_col} IS NOT NULL
+    #            AND {y_col} IS NOT NULL;
 
-      WITH binned_table AS
-           (SELECT FLOOR(({x_col}{cast_x_as} - {min_val_x})
-                             /({max_val_x} - {min_val_x}) 
-                             * {nbins_x}
-                        )
-                       /{nbins_x} * ({max_val_x} - {min_val_x}) 
-                       + {min_val_x} AS bin_nbr_x,
-                   FLOOR(({y_col}{cast_y_as} - {min_val_y})
-                             /({max_val_y} - {min_val_y}) 
-                             * {nbins_y}
-                        )
-                       /{nbins_y} * ({max_val_y} - {min_val_y}) 
-                       + {min_val_y} AS bin_nbr_y
-              FROM {table_name}
-             WHERE {x_col} IS NOT NULL
-               AND {y_col} IS NOT NULL
-           ),
-           scatter_bins AS
-           (SELECT *
-              FROM (SELECT x::NUMERIC/{nbins_x} * ({max_val_x} - {min_val_x})
-                               + {min_val_x} AS scat_bin_x
-                     FROM generate_series(0, {nbins_x}) AS x
-                   ) AS foo_x
-                   CROSS JOIN (SELECT y::NUMERIC/{nbins_y} * ({max_val_y} - {min_val_y})
-                                          + {min_val_y} AS scat_bin_y
-                                 FROM generate_series(0, {nbins_y}) AS y 
-                              ) AS foo_y
-           )
-    SELECT scat_bin_x, scat_bin_y, COUNT(bin_nbr_x) AS freq
-      FROM binned_table
-           RIGHT JOIN scatter_bins
-                   ON ROUND(bin_nbr_x::NUMERIC, 6) = ROUND(scat_bin_x::NUMERIC, 6)
-                  AND ROUND(bin_nbr_y::NUMERIC, 6) = ROUND(scat_bin_y::NUMERIC, 6)
-     GROUP BY scat_bin_x, scat_bin_y
-     ORDER BY scat_bin_x, scat_bin_y;
-    '''.format(x_col = column_name_x,
-               cast_x_as = cast_x_string,
-               y_col = column_name_y,
-               cast_y_as = cast_y_string,
-               min_val_x = min_val_x - 1e-8,
-               max_val_x = max_val_x + 1e-8,
-               min_val_y = min_val_y - 1e-8,
-               max_val_y = max_val_y + 1e-8,
-               nbins_x = nbins[0],
-               nbins_y = nbins[1],
-               table_name = table_name
-              )
+    # DROP TABLE IF EXISTS scatter_bins_temp;
+    # CREATE TABLE scatter_bins_temp
+    #    AS SELECT *
+    #           FROM (SELECT x::NUMERIC/{nbins_x} * ({max_val_x} - {min_val_x})
+    #                            + {min_val_x} AS scat_bin_x
+    #                  FROM generate_series(1, {nbins_x}) AS x
+    #                ) AS foo_x
+    #                CROSS JOIN (SELECT y::NUMERIC/{nbins_y} * ({max_val_y} - {min_val_y})
+    #                                       + {min_val_y} AS scat_bin_y
+    #                              FROM generate_series(1, {nbins_y}) AS y 
+    #                           ) AS foo_y;
+
+    #   WITH binned_table AS
+    #        (SELECT FLOOR(({x_col}{cast_x_as} - {min_val_x})
+    #                          /({max_val_x} - {min_val_x}) 
+    #                          * {nbins_x}
+    #                     )
+    #                    /{nbins_x} * ({max_val_x} - {min_val_x}) 
+    #                    + {min_val_x} AS bin_nbr_x,
+    #                FLOOR(({y_col}{cast_y_as} - {min_val_y})
+    #                          /({max_val_y} - {min_val_y}) 
+    #                          * {nbins_y}
+    #                     )
+    #                    /{nbins_y} * ({max_val_y} - {min_val_y}) 
+    #                    + {min_val_y} AS bin_nbr_y
+    #           FROM {table_name}
+    #          WHERE {x_col} IS NOT NULL
+    #            AND {y_col} IS NOT NULL
+    #        ),
+    #        scatter_bins AS
+    #        (SELECT *
+    #           FROM (SELECT x::NUMERIC/{nbins_x} * ({max_val_x} - {min_val_x})
+    #                            + {min_val_x} AS scat_bin_x
+    #                  FROM generate_series(0, {nbins_x}) AS x
+    #                ) AS foo_x
+    #                CROSS JOIN (SELECT y::NUMERIC/{nbins_y} * ({max_val_y} - {min_val_y})
+    #                                       + {min_val_y} AS scat_bin_y
+    #                              FROM generate_series(0, {nbins_y}) AS y 
+    #                           ) AS foo_y
+    #        )
+    # SELECT scat_bin_x, scat_bin_y, COUNT(bin_nbr_x) AS freq
+    #   FROM binned_table
+    #        RIGHT JOIN scatter_bins
+    #                ON ROUND(bin_nbr_x::NUMERIC, 6) = ROUND(scat_bin_x::NUMERIC, 6)
+    #               AND ROUND(bin_nbr_y::NUMERIC, 6) = ROUND(scat_bin_y::NUMERIC, 6)
+    #  GROUP BY scat_bin_x, scat_bin_y
+    #  ORDER BY scat_bin_x, scat_bin_y;
+    # '''.format(x_col = column_name_x,
+    #            cast_x_as = cast_x_string,
+    #            y_col = column_name_y,
+    #            cast_y_as = cast_y_string,
+    #            min_val_x = min_val_x - 1e-8,
+    #            max_val_x = max_val_x + 1e-8,
+    #            min_val_y = min_val_y - 1e-8,
+    #            max_val_y = max_val_y + 1e-8,
+    #            nbins_x = nbins[0],
+    #            nbins_y = nbins[1],
+    #            table_name = table_name
+    #           )
     
     if print_query:
         print dedent(sql)
