@@ -51,7 +51,7 @@ def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
                            else_=bin_nbr - 1
                           )
     # Scale the bins to their proper size
-    bin_nbr_scaled = bin_nbr_correct/nbins * (max_val - min_val)
+    bin_nbr_scaled = bin_nbr_correct/nbins * denom
     # Translate bins to their proper locations
     bin_loc = bin_nbr_scaled + min_val
 
@@ -73,7 +73,7 @@ def _get_bin_locs_time(nbins, col_val, min_val, max_val):
                            else_=bin_nbr - 1
                           )
     # Scale the bins to their proper size
-    bin_nbr_scaled = bin_nbr_correct/nbins * time_range_denom
+    bin_nbr_scaled = bin_nbr_correct/nbins * denom
     # Translate bins to their proper locations
     bin_loc = bin_nbr_scaled * text("INTERVAL '1 second'") + min_val
 
@@ -94,20 +94,11 @@ def _get_min_max_table(table_obj, column_name, alias_name, min_val_name,
                )\
         .alias(alias_name)
 
-    # min_max_tbl =\
-    #     select([func.min(table_obj.c[column_name]).label(min_val_name),
-    #             func.max(table_obj.c[column_name]).label(max_val_name)
-    #            ],
-    #            from_obj=table_obj
-    #            )\
-    #     .alias(alias_name)
-
     return min_max_tbl
 
 
 def _is_category_column(table_obj, column_name):
     """Returns whether the column is a category."""
-
     data_type = str(table_obj.c[column_name].type)
     numeric_types = ['BIGINT', 'DATE', 'DOUBLE PRECISION', 'INT',
                      'INTEGER', 'FLOAT', 'NUMERIC', 'TIMESTAMP',
@@ -135,21 +126,6 @@ def _listify(df_list, labels):
     return df_list, labels
 
 
-def _separate_schema_table(full_table_name, con):
-    """Separates schema name and table name.
-    
-    Inputs:
-    full_table_name - Schema and table name together joined by a '.'
-    con - A SQLAlchemy engine or psycopg2 connection object
-    """
-    if '.' in full_table_name:
-        return full_table_name.split('.')
-    else:
-        schema_name = con.execute(text('SELECT current_schema();')).scalar()
-        table_name = full_table_name
-        return schema_name, full_table_name
-
-
 
 def get_histogram_values(table_obj, column_name, engine, nbins=25,
                          bin_width=None, cast_as=None, print_query=False):
@@ -158,14 +134,21 @@ def get_histogram_values(table_obj, column_name, engine, nbins=25,
     Only one of these is specified. The other one must be left at its
     default value of 0 or it will throw an error.
     
-    Inputs:
-    table_obj - A SQLAlchemy Table or Select object
-    column_name - Name of the column of interest
-    engine - A SQLAlchemy engine object
-    nbins - Number of desired bins (Default: 25)
-    bin_width - Width of each bin (Default: None)
-    cast_as - SQL type to cast as (string or SQLAlchemy data type)
-    print_query - If True, print the resulting query.
+    Parameters
+    ----------
+    table_obj : SQLAlchemy Table, Select object
+        The table we wish to compute a histogram with
+    column_name : str
+        Name of the column of interest
+    engine : SQLAlchemy engine object
+    nbins : int, default 25
+        Number of desired bins
+    bin_width : int, default None
+        Width of each bin. If None, then use nbins to define bin width.
+    cast_as : SQLAlchemy data type, default None
+        SQL type to cast as
+    print_query : boolean, default False
+        If True, print the resulting query
     """
 
     def _check_for_input_errors(nbins, bin_width):
@@ -236,11 +219,14 @@ def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
     interpolating every single point with a straight line and computing
     the sum of the areas of all the trapezoids.
 
-    Inputs:
-    roc_df - A DataFrame with columns for true positive rate and false
-             positive rate
-    tpr_column - Name of the true positive rate column (Default: 'tpr')
-    fpr_column - Name of the false positive rate column (Default: 'fpr')
+    Parameters
+    ----------
+    roc_df : DataFrame
+        Contains the columns for true positive and false positive rates
+    tpr_column : str, default 'tpr'
+        Name of the true positive rate column
+    fpr_column : str, default 'fpr'
+        Name of the false positive rate column
     """
 
     # The average of the two consecutive tprs
@@ -254,13 +240,18 @@ def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
 def get_roc_values(table_obj, y_true, y_score, engine, print_query=False):
     """Computes the ROC curve in database.
 
-    Inputs:
-    table_obj - A SQLAlchemy Table or Select object
-    y_true - The name of the column that contains the true values
-    y_score - The name of the column that contains the scores of the
-              machine learning algorithm
-    engine - A SQLAlchemy engine object
-    print_query - If True, print the resulting query.
+    Parameters
+    ----------
+    table_obj : SQLAlchemy Table, Select object
+        The table we wish to compute a histogram with
+    y_true : str
+        Name of the column that contains the true values
+    y_score: str
+        Name of the column that contains the scores from the machine
+        learning algorithm
+    engine : SQLAlchemy engine object
+    print_query : boolean, default False
+        If True, print the resulting query
     """
 
     y_true_col = column('y_true')
@@ -308,7 +299,7 @@ def get_roc_values(table_obj, y_true, y_score, engine, print_query=False):
 
 
 def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
-                           nbins=(1000, 1000), bin_size=None, cast_x_as=None,
+                           nbins=(50, 50), bin_size=None, cast_x_as=None,
                            cast_y_as=None, print_query=False):
     """Takes a SQL table and creates scatter plot bin values. This is
     the 2D version of get_histogram_values. Relevant parameters are
@@ -317,18 +308,21 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
     The other pair must be left at its default value of 0 or it will
     throw an error.
     
-    Inputs:
-    table_obj - A SQLAlchemy Table or Select object
-    column_name_x - Name of one column of interest to be plotted
-    column_name_y - Name of another column of interest to be plotted
-    engine - A SQLAlchemy engine object
-    column_name - Name of the column of interest
-    nbins - Number of desired bins for x and y directions
-            (Default: (0, 0))
-    bin_size - Size of each bin for x and y directions (Default: (0, 0))
-    cast_x_as - SQL type to cast x as
-    cast_y_as - SQL type to cast y as
-    print_query - If True, print the resulting query.
+    Parameters
+    ----------
+    table_obj : SQLAlchemy Table, Select object
+        The table we wish to compute a histogram with
+    column_name_x : str
+        Name of one column of interest to be plotted
+    column_name_t : str
+        Name of another column of interest to be plotted
+    engine : SQLAlchemy engine object
+    nbins : tuple, default (1000, 1000)
+        Number of desird bins for x and y directions
+    bin_size : tuple, default None
+        The size of of the bins for the x and y directions
+    print_query : boolean, default False
+        If True, print the resulting query
     """
 
     def _check_for_input_errors(nbins, bin_size):
@@ -488,6 +482,7 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
             print scatterplot_tbl
 
         return psql.read_sql(scatterplot_tbl, engine)
+
 
 def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
                            null_at='left', order_by=0, ascending=True,
@@ -919,7 +914,8 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
 
 
 def plot_date_hists(df_list, labels=[], nbins=25, log=False, normed=False,
-                    null_at='left', color_palette=sns.color_palette('deep')):
+                    null_at='left',
+                    color_palette=sns.color_palette('colorblind')):
     """Plots histograms by date.
 
     Inputs:
@@ -961,26 +957,33 @@ def plot_date_hists(df_list, labels=[], nbins=25, log=False, normed=False,
 
 def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('deep')[0],
                      plot_type='scatter', by_size=True, by_opacity=True,
-                     marker='o'):
+                     marker='o', cmap='Blues'):
     """Plots a scatter plot based on the computed scatter plot bins.
 
-    Inputs:
-    scatter_df - a pandas DataFrame which has three columns (scat_bin_x,
-                 scat_bin_y, and freq), where the scat_bin_x and
-                 scat_bin_y are the bins along the x and y axes and freq
-                 is how many values fall in that bin.
-    s - The size of each point (Default: 20)
-    c - The colour of the plot (Default: seaborn deep blue)
-    plot_type - The plot type. Can be either 'scatter' or 'heatmap'.
-                (Default: scatter)
-    by_size - If True, then the size of each plotted point will be
-              proportional to the frequency. Otherwise, it will be a
-              constant size specified by s (Default: True)
-    by_opacity - If True, then the opacity of each plotted point will be
-                 proportional to the frequency. Darker implies more data
-                 in that bin. (Default: True)
-    marker - matplotlib marker to plot (Default: 'o')
+    Parameters
+    ----------
+    scatter_df : DataFrame
+        DataFrame with three columns: scat_bin_x, scat_bin_y, and freq.
+        The columns scat_bin_x and scat_bin_y are the bins along the 
+        x and y axes and freq is how many values fall into the bin.
+    s : int, default 20
+        The size of each point
+    c : tuple or string, default seaborn deep blue
+        The colour of the plot
+    by_size : boolean, default True
+        If True, then the size of each plotted point will be
+        proportional to its frequency. Otherwise, each point will be a
+        constant size specified by s.
+    by_opacity : boolean, default True
+        If True, then the opacity of each plotted point will be
+        proportional to its frequency. A darker bin immplies more data
+        in that bin
+    marker : str, default 'o'
+        matplotlib marker
     """
+
+    if plot_type not in ['scatter', 'heatmap']:
+        raise ValueError("plot_type must be either 'scatter' or 'heatmap'.")
 
     if plot_type == 'scatter':
         if not by_size and not by_opacity:
@@ -1012,6 +1015,6 @@ def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('deep')[0],
         y = scatter_df['scat_bin_y'].values.reshape(num_x, num_y)
         z = scatter_df['freq'].values.reshape(num_x, num_y) 
 
-        plt.pcolor(x, y, z)
+        plt.pcolor(x, y, z, cmap=cmap)
         plt.xlim(x.min(), x.max())
         plt.ylim(y.min(), y.max())
