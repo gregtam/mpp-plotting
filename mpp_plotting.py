@@ -94,6 +94,14 @@ def _get_min_max_table(table_obj, column_name, alias_name, min_val_name,
                )\
         .alias(alias_name)
 
+    # min_max_tbl =\
+    #     select([func.min(table_obj.c[column_name]).label(min_val_name),
+    #             func.max(table_obj.c[column_name]).label(max_val_name)
+    #            ],
+    #            from_obj=table_obj
+    #            )\
+    #     .alias(alias_name)
+
     return min_max_tbl
 
 
@@ -334,32 +342,47 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
         elif nbins is not None:
             if nbins[0] < 0 or nbins[1] < 0:
                 raise Exception('Number of bin dimensions must both be positive')
-    
-    # def _min_max_value(table_name, column_name, cast_as):
-    #     """Get the min and max value of a specified column."""
-    #     sql = '''
-    #     SELECT MIN({column_name}{cast_as}), MAX({column_name}{cast_as})
-    #       FROM {table_name};
-    #     '''.format(**locals())
 
-    #     return tuple(psql.read_sql(sql, conn).iloc[0])
-     
+    def _get_bin_loc_tbl(min_max_tbl, nbins, bin_name, min_val, max_val):
+        """Gets all bin locations for a numeric type, including for bins
+        that do not contain any data. This is used for scatter plot
+        heatmaps where we will need to fill it in. Regular scatter plots
+        do not need since this we perform a simple group by.
+        """
+
+        bin_range = max_val - min_val
+        bin_loc = column('bin_nbr').cast(Numeric)/nbins * bin_range + min_val
+
+        bin_loc_tbl =\
+            select([bin_loc.cast(Numeric).label(bin_name)],
+                   from_obj=[func.generate_series(1, nbins).alias('bin_nbr'),
+                             min_max_tbl
+                            ]
+                  )
+
+        return bin_loc_tbl
+
+    def _get_scat_bin_tbl(bin_loc_tbl_x, bin_loc_tbl_y):
+        """Gets the scatter plot bin location pairs."""
+
+        bin_loc_tbl_x_alias = bin_loc_tbl_x.alias('bin_loc_x')
+        bin_loc_tbl_y_alias = bin_loc_tbl_y.alias('bin_loc_y')
+
+        scat_bin_tbl =\
+            select(bin_loc_tbl_x_alias.c + bin_loc_tbl_y_alias.c,
+                   from_obj=[bin_loc_tbl_x_alias,
+                             bin_loc_tbl_y_alias
+                            ]
+                  )\
+            .alias('scat_bin_tbl')
+
+        return scat_bin_tbl
 
     _check_for_input_errors(nbins, bin_size)
     is_category_x = _is_category_column(table_obj, column_name_x)
     is_category_y = _is_category_column(table_obj, column_name_y)
     is_time_type_x = _is_time_type(table_obj, column_name_x)
     is_time_type_y = _is_time_type(table_obj, column_name_y)
-
-    # Get the min and max values for x and y directions
-    # min_val_x, max_val_x = _min_max_value(table_name,
-    #                                       column_name_x,
-    #                                       cast_as=cast_x_string
-    #                                      )
-    # min_val_y, max_val_y = _min_max_value(table_name,
-    #                                       column_name_y,
-    #                                       cast_as=cast_y_string
-    #                                      )
 
     if is_category_x and is_category_y:
         binned_table =\
@@ -372,6 +395,11 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
             .group_by(column_name_x, column_name_y)\
             .order_by(column_name_x, column_name_y)
 
+        if print_query:
+            print binned_table
+
+        return psql.read_sql(binned_table, engine)
+
     elif not is_category_x and not is_category_y:
         min_val_x = column('min_val_x')
         max_val_x = column('max_val_x')
@@ -379,7 +407,7 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
 
         min_val_y = column('min_val_y')
         max_val_y = column('max_val_y')
-        col_val_y = column(column_name_x)
+        col_val_y = column(column_name_y)
 
         min_max_tbl_x = _get_min_max_table(table_obj,
                                            column_name_x,
@@ -415,112 +443,51 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
                                               min_val_y, max_val_y)
 
         binned_table =\
-            select([bin_loc_x.label('bin_loc_x'),
-                    bin_loc_y.label('bin_loc_y'),
+            select([bin_loc_x.cast(Numeric).label('bin_loc_x'),
+                    bin_loc_y.cast(Numeric).label('bin_loc_y'),
                     func.count('*').label('freq')
                    ],
                    from_obj=[table_obj, min_max_tbl_x, min_max_tbl_y]
                    )\
             .group_by('bin_loc_x', 'bin_loc_y')\
-            .order_by('bin_loc_x', 'bin_loc_y')
 
-        # binned_table =\
-        #     select([bin_loc_x.label('bin_loc_x'),
-        #             func.count('*').label('freq')
-        #            ],
-        #            from_obj=[table_obj, min_max_tbl_x]
-        #            )\
-        #     .group_by('bin_loc_x')\
-        #     .order_by('bin_loc_x')
+        bin_loc_tbl_x = _get_bin_loc_tbl(min_max_tbl_x,
+                                         nbins[0],
+                                         'scat_bin_x',
+                                         min_val_x,
+                                         max_val_x
+                                        )
+        bin_loc_tbl_y = _get_bin_loc_tbl(min_max_tbl_y,
+                                         nbins[1],
+                                         'scat_bin_y',
+                                         min_val_y,
+                                         max_val_y
+                                        )
+        scat_bin_tbl = _get_scat_bin_tbl(bin_loc_tbl_x, bin_loc_tbl_y)
+        
+        join_table =\
+            scat_bin_tbl.alias('scat_bin_table')\
+            .join(binned_table.alias('binned_table'),
+                  isouter=True,
+                  onclause=and_(column('bin_loc_x') == column('scat_bin_x'),
+                                column('bin_loc_y') == column('scat_bin_y')
+                               )
+                 )
 
-    return psql.read_sql(binned_table, engine)
+
+        scatterplot_tbl =\
+            select([column('scat_bin_x'),
+                    column('scat_bin_y'),
+                    func.coalesce(column('freq'), 0).label('freq')
+                   ],
+                   from_obj=join_table
+                  )
+        
     
-    # sql = '''
-    # DROP TABLE IF EXISTS binned_table_temp;
-    # CREATE TABLE binned_table_temp
-    #    AS SELECT FLOOR(({x_col}{cast_x_as} - {min_val_x})
-    #                          /({max_val_x} - {min_val_x}) 
-    #                          * {nbins_x}
-    #                     )
+        if print_query:
+            print scatterplot_tbl
 
-
-    #                    /{nbins_x} * ({max_val_x} - {min_val_x}) 
-    #                    + {min_val_x} AS bin_nbr_x,
-    #                FLOOR(({y_col}{cast_y_as} - {min_val_y})
-    #                          /({max_val_y} - {min_val_y}) 
-    #                          * {nbins_y}
-    #                     )
-    #                    /{nbins_y} * ({max_val_y} - {min_val_y}) 
-    #                    + {min_val_y} AS bin_nbr_y
-    #           FROM {table_name}
-    #          WHERE {x_col} IS NOT NULL
-    #            AND {y_col} IS NOT NULL;
-
-    # DROP TABLE IF EXISTS scatter_bins_temp;
-    # CREATE TABLE scatter_bins_temp
-    #    AS SELECT *
-    #           FROM (SELECT x::NUMERIC/{nbins_x} * ({max_val_x} - {min_val_x})
-    #                            + {min_val_x} AS scat_bin_x
-    #                  FROM generate_series(1, {nbins_x}) AS x
-    #                ) AS foo_x
-    #                CROSS JOIN (SELECT y::NUMERIC/{nbins_y} * ({max_val_y} - {min_val_y})
-    #                                       + {min_val_y} AS scat_bin_y
-    #                              FROM generate_series(1, {nbins_y}) AS y 
-    #                           ) AS foo_y;
-
-    #   WITH binned_table AS
-    #        (SELECT FLOOR(({x_col}{cast_x_as} - {min_val_x})
-    #                          /({max_val_x} - {min_val_x}) 
-    #                          * {nbins_x}
-    #                     )
-    #                    /{nbins_x} * ({max_val_x} - {min_val_x}) 
-    #                    + {min_val_x} AS bin_nbr_x,
-    #                FLOOR(({y_col}{cast_y_as} - {min_val_y})
-    #                          /({max_val_y} - {min_val_y}) 
-    #                          * {nbins_y}
-    #                     )
-    #                    /{nbins_y} * ({max_val_y} - {min_val_y}) 
-    #                    + {min_val_y} AS bin_nbr_y
-    #           FROM {table_name}
-    #          WHERE {x_col} IS NOT NULL
-    #            AND {y_col} IS NOT NULL
-    #        ),
-    #        scatter_bins AS
-    #        (SELECT *
-    #           FROM (SELECT x::NUMERIC/{nbins_x} * ({max_val_x} - {min_val_x})
-    #                            + {min_val_x} AS scat_bin_x
-    #                  FROM generate_series(0, {nbins_x}) AS x
-    #                ) AS foo_x
-    #                CROSS JOIN (SELECT y::NUMERIC/{nbins_y} * ({max_val_y} - {min_val_y})
-    #                                       + {min_val_y} AS scat_bin_y
-    #                              FROM generate_series(0, {nbins_y}) AS y 
-    #                           ) AS foo_y
-    #        )
-    # SELECT scat_bin_x, scat_bin_y, COUNT(bin_nbr_x) AS freq
-    #   FROM binned_table
-    #        RIGHT JOIN scatter_bins
-    #                ON ROUND(bin_nbr_x::NUMERIC, 6) = ROUND(scat_bin_x::NUMERIC, 6)
-    #               AND ROUND(bin_nbr_y::NUMERIC, 6) = ROUND(scat_bin_y::NUMERIC, 6)
-    #  GROUP BY scat_bin_x, scat_bin_y
-    #  ORDER BY scat_bin_x, scat_bin_y;
-    # '''.format(x_col = column_name_x,
-    #            cast_x_as = cast_x_string,
-    #            y_col = column_name_y,
-    #            cast_y_as = cast_y_string,
-    #            min_val_x = min_val_x - 1e-8,
-    #            max_val_x = max_val_x + 1e-8,
-    #            min_val_y = min_val_y - 1e-8,
-    #            max_val_y = max_val_y + 1e-8,
-    #            nbins_x = nbins[0],
-    #            nbins_y = nbins[1],
-    #            table_name = table_name
-    #           )
-    
-    if print_query:
-        print dedent(sql)
-
-    return psql.read_sql(sql, conn)
-
+        return psql.read_sql(scatterplot_tbl, engine)
 
 def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
                            null_at='left', order_by=0, ascending=True,
@@ -787,7 +754,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     
     Inputs:
     df_list - A pandas DataFrame or a list of DataFrames which have two
-              columns (bin_nbr and freq). The bin_nbr is the value of
+              columns (bin_loc and freq). The bin_loc is the value of
               the histogram bin and the frequency is how many values
               fall in that bin.
     labels - A string (for one histogram) or list of strings which sets
@@ -807,7 +774,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     
     def _check_for_nulls(df_list):
         """Returns a list of whether each list has a null column."""
-        return [df['bin_nbr'].isnull().any() for df in df_list]
+        return [df.bin_loc.isnull().any() for df in df_list]
 
     def _get_null_weights(has_null, df_list):
         """ If there are nulls, determine the weights.  Otherwise, set 
@@ -816,24 +783,24 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
         Returns the list of null weights.
         """
 
-        return [float(df[df['bin_nbr'].isnull()].weights)
+        return [float(df[df.bin_loc.isnull()].weights)
                 if is_null else 0 
                 for is_null, df in zip(has_null, df_list)]
 
-    def _get_data_type(bin_nbrs):
+    def _get_data_type(bin_locs):
         """ Returns the data type in the histogram, i.e., whether it is
         numeric or a timetamp. This is important because it determines
         how we deal with the bins.
         """
 
-        if 'float' in str(type(bin_nbrs[0][0])) or 'int' in str(type(bin_nbrs[0][0])):
+        if 'float' in str(type(bin_locs[0][0])) or 'int' in str(type(bin_locs[0][0])):
             return 'numeric'
-        elif str(type(bin_nbrs[0][0])) == "<class 'pandas.tslib.Timestamp'>":
+        elif str(type(bin_locs[0][0])) == "<class 'pandas.tslib.Timestamp'>":
             return 'timestamp'
         else:
-            raise Exception('Bin data type not valid: {}'.format(type(bin_nbrs[0][0])))
+            raise Exception('Bin data type not valid: {}'.format(type(bin_locs[0][0])))
 
-    def _plot_hist(data_type, bin_nbrs, weights, labels, bins, log):
+    def _plot_hist(data_type, bin_locs, weights, labels, bins, log):
         """Plots the histogram for non-null values with corresponding
         labels if provided. This function will take also reduce the
         number of bins in the histogram. This is useful if we want to
@@ -845,10 +812,10 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
         # If the bin type is numeric
         if data_type == 'numeric':
             if len(labels) > 0:
-                _, bins, _ = plt.hist(x=bin_nbrs, weights=weights,
+                _, bins, _ = plt.hist(x=bin_locs, weights=weights,
                                       label=labels, bins=nbins, log=log)
             else:
-                _, bins, _ = plt.hist(x=bin_nbrs, weights=weights, bins=nbins,
+                _, bins, _ = plt.hist(x=bin_locs, weights=weights, bins=nbins,
                                       log=log)
             return bins
 
@@ -857,7 +824,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
             # Since pandas dataframes will convert timestamps and date
             # types to pandas.tslib.Timestamp types, we will need
             # to convert them to datetime since these can be plotted.
-            datetime_list = [dt.to_pydatetime() for dt in bin_nbrs[0]]
+            datetime_list = [dt.to_pydatetime() for dt in bin_locs[0]]
             _, bins, _ = plt.hist(x=datetime_list, weights=weights[0],
                                   bins=nbins, log=log)
             return bins
@@ -927,12 +894,12 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     
     df_list = [df.dropna() for df in df_list]
     weights = [df.weights for df in df_list]
-    bin_nbrs = [df.bin_nbr for df in df_list]
+    bin_locs = [df.bin_loc for df in df_list]
     
-    data_type = _get_data_type(bin_nbrs)
+    data_type = _get_data_type(bin_locs)
 
     # Plot histograms and retrieve bins
-    bin_info = _plot_hist(data_type, bin_nbrs, weights, labels, nbins, log)
+    bin_info = _plot_hist(data_type, bin_locs, weights, labels, nbins, log)
 
     null_bin_width = _get_null_bin_width(data_type, bin_info, num_hists, null_weights)
     null_bin_left = _get_null_bin_left(data_type, null_at, num_hists, bin_info, null_weights)
