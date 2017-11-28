@@ -503,12 +503,11 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         Whether to display y axis on log scale
     normed : bool, default False
         Whether to normalize histograms so that the heights of each bin
-        sum up to 1. This is useful for plotting columns with difference
+        sum up to 1. This is useful for plotting columns with different
         sizes
     null_at : str, default 'order'
         Which side to set a null value column. The options are:
             'left' - Put the null on the left side
-            'order' - Leave it in its respective order
             'right' - Put it on the right side
             '' - If left blank, leave out
     order_by : {'alphabetical', int}, default 0
@@ -530,7 +529,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         Returns the joined DataFrame
         """
 
-        for i in range(len(df_list)):
+        for i in xrange(len(df_list)):
             temp_df = df_list[i].copy()
             temp_df.columns = ['category', 'freq_{}'.format(i)]
 
@@ -563,7 +562,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
             return hist_df\
                 .sort_values('category', ascending=ascending)\
                 .reset_index(drop=True)
-        elif str(type(order_by)) == "<type 'int'>":
+        elif isinstance(order_by, int):
             # Desired column in the hist_df DataFrame
             weights_col = 'weights_{}'.format(order_by)
 
@@ -730,21 +729,38 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
     num_hists = len(df_list)
     num_categories = _get_num_categories(hist_df)
 
-    bin_left, null_bin_left = _get_bin_left(null_at, hist_df)
-    bin_height, null_bin_height = _get_bin_height(null_at, order_by, hist_df)
-    bin_width = _get_bin_width(num_hists)
+    hist_df.set_index('category', inplace=True)
 
-    # Plotting functions
-    _plot_all_histograms(bin_left,
-                         bin_height,
-                         null_bin_left,
-                         null_bin_height,
-                         bin_width
-                        )
-    _plot_xticks(null_at, bin_left, hist_df)
+    # Normalize
+    if normed:
+        col_type = 'weights'
+        hist_df = hist_df.filter(regex='weights_[0-9]+')
+    else:
+        col_type = 'freq'
+        hist_df = hist_df.filter(regex='freq_[0-9]+')
 
-    if log:
-        _plot_new_yticks(bin_height)
+    # Get ordering
+    if order_by == 'alphabetical':
+        if null_at == 'left':
+            na_position='first'
+        else:
+            na_position='last'
+
+        if null_at == '':
+            hist_df = hist_df[~hist_df.index.isnull()]
+
+        hist_df.sort_index(ascending=ascending,
+                           na_position=na_position,
+                           inplace=True
+                          )
+
+    elif isinstance(order_by, int):
+        col_name = '{}_{}'.format(col_type, order_by)
+        hist_df.sort_values(col_name, ascending=ascending, inplace=True)
+
+    hist_df.plot(kind='bar', log=log)
+        
+    return hist_df
 
 
 def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
@@ -752,24 +768,31 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
                        color_palette=sns.color_palette('deep')):
     """Plots numerical histograms together.
     
-    Inputs:
-    df_list - A pandas DataFrame or a list of DataFrames which have two
-              columns (bin_loc and freq). The bin_loc is the value of
-              the histogram bin and the frequency is how many values
-              fall in that bin.
-    labels - A string (for one histogram) or list of strings which sets
-             the labels for the histograms
-    nbins - The desired number of bins (Default: 25)
-    log - Boolean of whether to display y axis on log scale
-          (Default: False)
-    normed - Boolean of whether to normalize histograms so that the
-             heights of each bin sum up to 1. This is useful for
-             plotting columns with difference sizes (Default: False)
-    null_at - Which side to set a null value column. Options are 'left'
-              or 'right'. Leave it empty to not include (Default: left)
-    color_palette - Seaborn colour palette, i.e., a list of tuples
-                    representing the colours. (Default: sns deep color
-                    palette)
+    Parameters
+    ----------
+    df_list : A DataFrame or a list of DataFrames
+        DataFrame or list of DataFrames which have two columns
+        bin_loc and freq). Bin location marks the edges of the bins
+        and the frequency is how many values fall in each bin.
+    labels : str or list of str
+        A string (for one histogram) or list of strings which sets the
+        labels for the histograms
+    nbins : int, default 25
+        The desired number of bins
+    log : bool, default False
+        Whether to display y axis on log scale
+    normed : bool, default False
+        Whether to normalize histograms so that the heights of each bin
+        sum up to 1. This is useful for plotting columns with different
+        sizes
+    null_at : str, default 'left'
+        Which side to set a null value column. The options are:
+            'left' - Put the null on the left side
+            'right' - Put it on the right side
+            '' - If left blank, leave out
+    color_palette : list of tuples, default sns deep colour palette
+        Seaborn colour palette, i.e., a list of tuples representing the
+        colours.
     """
     
     def _check_for_nulls(df_list):
@@ -777,7 +800,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
         return [df.bin_loc.isnull().any() for df in df_list]
 
     def _get_null_weights(has_null, df_list):
-        """ If there are nulls, determine the weights.  Otherwise, set 
+        """If there are nulls, determine the weights.  Otherwise, set 
         weights to 0.
         
         Returns the list of null weights.
