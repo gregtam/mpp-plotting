@@ -41,16 +41,17 @@ def _create_weight_percentage(hist_col, normed=False):
 
 def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
     """Gets the bin locations for a numeric type."""
-
     # Which bin it should fall into
     numer = (col_val - min_val).cast(Numeric)
     denom = (max_val - min_val).cast(Numeric)
     bin_nbr = func.floor(numer/denom * nbins)
+
     # Group max value into the last bin. It would otherwise be in a
     # separate bin on its own.
     bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
                            else_=bin_nbr - 1
                           )
+
     # Scale the bins to their proper size
     bin_nbr_scaled = bin_nbr_correct/nbins * denom
     # Translate bins to their proper locations
@@ -61,7 +62,6 @@ def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
 
 def _get_bin_locs_time(nbins, col_val, min_val, max_val):
     """Gets the bin locations for a time type."""
-
     # Get the SQL expressions for the time ranges
     numer = func.extract('EPOCH', col_val - max_val).cast(Numeric)
     denom = func.extract('EPOCH', min_val - max_val).cast(Numeric)
@@ -490,34 +490,37 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
                            color_palette=sns.color_palette('deep')):
     """Plots categorical histograms.
     
-    Inputs:
-    df_list - A pandas DataFrame or a list of DataFrames which have two
-              columns (bin_nbr and freq). The bin_nbr is the value of 
-              the histogram bin and the frequency is how many values 
-              fall in that bin.
-    labels - A string (for one histogram) or list of strings which sets 
-             the labels for the histograms
-    log - Boolean of whether to display y axis on log scale
-          (Default: False)
-    normed - Boolean of whether to normalize histograms so that the 
-             heights of each bin sum up to 1. This is useful for 
-             plotting columns with difference sizes (Default: False)
-    null_at - Which side to set a null value column. The options are:
-              'left' - Put the null on the left side
-              'order' - Leave it in its respective order
-              'right' - Put it on the right side
-              '' - If left blank, leave out              
-              (Default: order)
-    order_by - How to order the bars. The options are:
-               'alphetical' - Orders the categories in alphabetical
-                            order
-               integer - an integer value denoting for which df_list
-                         DataFrame to sort by
-    ascending - Boolean of whether to sort values in ascending order 
-                (Default: False)
-    color_palette - Seaborn colour palette, i.e., a list of tuples
-                    representing the colours. 
-                    (Default: sns deep color palette)
+    Parameters
+    ----------
+    df_list : A DataFrame or a list of DataFrames
+        DataFrame or list of DataFrames which have two columns
+        category and freq). Category is the unique value of the column
+        and the frequency is how many values fall in that bin.
+    labels : str or list of str
+        A string (for one histogram) or list of strings which sets the
+        labels for the histograms
+    log : bool, default False
+        Whether to display y axis on log scale
+    normed : bool, default False
+        Whether to normalize histograms so that the heights of each bin
+        sum up to 1. This is useful for plotting columns with difference
+        sizes
+    null_at : str, default 'order'
+        Which side to set a null value column. The options are:
+            'left' - Put the null on the left side
+            'order' - Leave it in its respective order
+            'right' - Put it on the right side
+            '' - If left blank, leave out
+    order_by : {'alphabetical', int}, default 0
+        How to order the bars. The options are:
+            'alphabetical' - Orders the categories in alphabetical order
+            integer - An integer value denoting for which df_list
+                DataFrame to sort by
+    ascending : bool, default False
+        Whether to sort values in ascending order
+    color_palette : list of tuples, default sns deep colour palette
+        Seaborn colour palette, i.e., a list of tuples representing the
+        colours.
     """
 
     def _join_freq_df(df_list):
@@ -675,6 +678,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
                     color=color_palette[i])
 
     def _plot_xticks(loc, bin_left, hist_df):
+        """Plots the xtick labels."""
         # If there are any NULL categories
         if np.sum(hist_df.category.isnull()) > 0:
             if loc == 'left':
