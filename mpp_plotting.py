@@ -13,13 +13,12 @@ import seaborn as sns
 import sqlalchemy
 from sqlalchemy import create_engine, Column, MetaData, Table
 from sqlalchemy import all_, and_, any_, not_, or_
-from sqlalchemy import alias, between, case, cast, column, distinct, false,\
-                       func, intersect, literal, literal_column, select, text,\
-                       true
+from sqlalchemy import alias, between, case, cast, column, distinct, extract,\
+                       false, func, intersect, literal, literal_column,\
+                       select, text, true, union, union_all
 from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, Float,\
                        Numeric, String
 
-import credentials
 
 
 def _add_weights_column(df_list, normed):
@@ -81,35 +80,35 @@ def _get_bin_locs_time(nbins, col_val, min_val, max_val):
     return bin_loc
 
 
-def _get_min_max_table(table_obj, column_name, alias_name, min_val_name,
+def _get_min_max_alias(from_obj, column_name, alias_name, min_val_name,
                        max_val_name):
-    """Returns a SQLAlchemy table that captures the min and max values
+    """Returns a SQLAlchemy alias that captures the min and max values
     of a column.
     """
 
-    min_max_tbl =\
+    min_max_alias =\
         select([func.min(column(column_name)).label(min_val_name),
                 func.max(column(column_name)).label(max_val_name)
                ],
-               from_obj=table_obj
+               from_obj=from_obj
                )\
         .alias(alias_name)
 
-    return min_max_tbl
+    return min_max_alias
 
 
-def _is_category_column(table_obj, column_name):
+def _is_category_column(from_obj, column_name):
     """Returns whether the column is a category."""
-    data_type = str(table_obj.c[column_name].type)
+    data_type = str(from_obj.c[column_name].type)
     numeric_types = ['BIGINT', 'DATE', 'DOUBLE PRECISION', 'INT',
                      'INTEGER', 'FLOAT', 'NUMERIC', 'TIMESTAMP',
                      'TIMESTAMP WITHOUT TIME ZONE']
     return data_type not in numeric_types
 
 
-def _is_time_type(table_obj, column_name):
+def _is_time_type(from_obj, column_name):
     """Returns whether the column is a time type (date or timestamp)."""
-    data_type = str(table_obj.c[column_name].type)
+    data_type = str(from_obj.c[column_name].type)
     time_types = ['DATE', 'TIMESTAMP', 'TIMESTAMP WITHOUT TIME ZONE']
     return data_type in time_types
 
@@ -128,7 +127,7 @@ def _listify(df_list, labels):
 
 
 
-def get_histogram_values(table_obj, column_name, engine, nbins=25,
+def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
                          bin_width=None, cast_as=None, print_query=False):
     """Takes a SQL table and creates histogram bin heights. Relevant
     parameters are either the number of bins or the width of each bin.
@@ -137,11 +136,13 @@ def get_histogram_values(table_obj, column_name, engine, nbins=25,
     
     Parameters
     ----------
-    table_obj : SQLAlchemy Table, Select object
+    data : str or SQLAlchemy selectable
         The table we wish to compute a histogram with
     column_name : str
         Name of the column of interest
     engine : SQLAlchemy engine object
+    schema : str, default None
+        The name of the schema where data is found
     nbins : int, default 25
         Number of desired bins
     bin_width : int, default None
@@ -162,16 +163,22 @@ def get_histogram_values(table_obj, column_name, engine, nbins=25,
         if bin_width is not None and bin_width < 0:
             raise Exception('bin_width must be positive.')
 
+    if schema is not None and not isinstance(data, str):
+        raise ValueError('schema cannot be specified unless data is of string type.')
+    if isinstance(data, str):
+        metadata = MetaData(engine)
+        data = Table(data, metadata, autoload=True, schema=schema)
+
     _check_for_input_errors(nbins, bin_width)
-    is_category = _is_category_column(table_obj, column_name)
-    is_time_type = _is_time_type(table_obj, column_name)
+    is_category = _is_category_column(data, column_name)
+    is_time_type = _is_time_type(data, column_name)
 
     if is_category:
-        binned_table =\
+        binned_slct =\
             select([column(column_name).label('category'),
                     func.count('*').label('freq')
                    ],
-                   from_obj=table_obj
+                   from_obj=data
                   )\
             .group_by(column_name)\
             .order_by(column_name)
@@ -182,12 +189,12 @@ def get_histogram_values(table_obj, column_name, engine, nbins=25,
         col_val = column(column_name)
         
         # Table to get min and max value
-        min_max_tbl = _get_min_max_table(table_obj,
-                                         column_name,
-                                         'min_max_table',
-                                         min_val.name,
-                                         max_val.name
-                                        )
+        min_max_alias = _get_min_max_alias(data,
+                                           column_name,
+                                           'min_max_table',
+                                           min_val.name,
+                                           max_val.name
+                                          )
 
         if bin_width is not None:
             # If bin width is not specified, calculate nbins from it.
@@ -199,23 +206,23 @@ def get_histogram_values(table_obj, column_name, engine, nbins=25,
             bin_loc = _get_bin_locs_numeric(nbins, col_val, min_val, max_val)
 
         # Group by the bin locations
-        binned_table =\
+        binned_slct =\
             select([bin_loc.label('bin_loc'),
                     func.count('*').label('freq')
                    ], 
-                   from_obj=[table_obj, min_max_tbl]
+                   from_obj=[data, min_max_alias]
                   )\
             .group_by('bin_loc')\
             .order_by('bin_loc')
 
     if print_query:
-        print binned_table
+        print binned_slct
 
-    return psql.read_sql(binned_table, engine)
+    return psql.read_sql(binned_slct, engine)
 
 
 def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
-    """Given an ROC DataFrame such as the one created in get_roc_values,
+    """Given an ROC DataFrame such as the one created in get_roc_curve,
     return the AUC. This is achieved by taking the ROC curve and 
     interpolating every single point with a straight line and computing
     the sum of the areas of all the trapezoids.
@@ -228,6 +235,10 @@ def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
         Name of the true positive rate column
     fpr_column : str, default 'fpr'
         Name of the false positive rate column
+
+    Returns
+    -------
+    auc_val : float
     """
 
     # The average of the two consecutive tprs
@@ -235,15 +246,17 @@ def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
     # The width (i.e., distance between two consecutive fprs)
     width = roc_df[fpr_column].diff()[1:]
 
-    return sum(avg_height * width)
+    auc_val = sum(avg_height * width)
+    return auc_val
 
 
-def get_roc_values(table_obj, y_true, y_score, engine, print_query=False):
+def get_roc_curve(data, y_true, y_score, engine, schema=None,
+                  print_query=False):
     """Computes the ROC curve in database.
 
     Parameters
     ----------
-    table_obj : SQLAlchemy Table, Select object
+    data : str or SQLAlchemy selectable
         The table we wish to compute a histogram with
     y_true : str
         Name of the column that contains the true values
@@ -251,22 +264,36 @@ def get_roc_values(table_obj, y_true, y_score, engine, print_query=False):
         Name of the column that contains the scores from the machine
         learning algorithm
     engine : SQLAlchemy engine object
+    schema : str, default None
+        The name of the schema where data is found
     print_query : boolean, default False
         If True, print the resulting query
+
+    Returns
+    -------
+    roc_df : DataFrame
     """
 
-    y_true_col = column('y_true')
-    y_score_col = column('y_score')
+    if schema is not None and not isinstance(data, str):
+        raise ValueError('schema cannot be specified unless data is of string type.')
+    if isinstance(data, str):
+        metadata = MetaData(engine)
+        data = Table(data, metadata, autoload=True, schema=schema)
 
-    row_nbr_tbl =\
+    y_true_col = column(y_true)
+    y_score_col = column(y_score)
+
+    # Add row numbers
+    row_nbr_alias =\
         select([func.row_number()
                     .over(order_by=y_score_col)
-               ] + list(table_obj.c)
+               ] + list(data.c)
               )\
-        .alias('row_nbr_tbl')
+        .alias('row_nbr')
 
-    pre_roc_tbl =\
-        select(row_nbr_tbl.c
+    # Calculate number of positives and negatives past a given threshold
+    pre_roc_alias =\
+        select(row_nbr_alias.c
                + [func.sum(y_true_col)
                       .over(order_by=y_score_col.desc())
                       .label('num_pos'),
@@ -275,33 +302,36 @@ def get_roc_values(table_obj, y_true, y_score, engine, print_query=False):
                       .label('num_neg')
                  ]
               )\
-        .alias('pre_roc_tbl')
+        .alias('pre_roc')
 
-    class_sizes_tbl =\
+    # Get the sizes of the positive and negative classes
+    class_sizes_alias =\
         select([func.sum(y_true_col).label('tot_pos'),
                 func.sum(1 - y_true_col).label('tot_neg')
                ],
-               from_obj=table_obj
+               from_obj=data
               )\
-        .alias('class_sizes_tbl')
+        .alias('class_sizes')
 
-    roc_tbl =\
+    # Compute ROC curve values
+    roc_slct =\
         select([distinct(y_score_col).label('thresholds'),
                 (column('num_pos')/column('tot_pos').cast(Numeric))
                     .label('tpr'),
                 (column('num_neg')/column('tot_neg').cast(Numeric))
                     .label('fpr')
                ],
-               from_obj=[pre_roc_tbl, class_sizes_tbl]
+               from_obj=[pre_roc_alias, class_sizes_alias]
               )\
-        .order_by(column('tpr'), column('fpr'))
+        .order_by('tpr', 'fpr')
 
-    return psql.read_sql(roc_tbl, engine)
+    roc_df = psql.read_sql(roc_slct, engine)
+    return roc_df
 
 
-def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
-                           nbins=(50, 50), bin_size=None, cast_x_as=None,
-                           cast_y_as=None, print_query=False):
+def get_scatterplot_values(data, column_name_x, column_name_y, engine,
+                           schema=None, nbins=(50, 50), bin_size=None,
+                           cast_x_as=None, cast_y_as=None, print_query=False):
     """Takes a SQL table and creates scatter plot bin values. This is
     the 2D version of get_histogram_values. Relevant parameters are
     either the number of bins or the size of each bin in both the x and
@@ -311,19 +341,25 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
     
     Parameters
     ----------
-    table_obj : SQLAlchemy Table, Select object
+    data : str or SQLAlchemy selectable
         The table we wish to compute a histogram with
     column_name_x : str
         Name of one column of interest to be plotted
     column_name_t : str
         Name of another column of interest to be plotted
-    engine : SQLAlchemy engine object
-    nbins : tuple, default (1000, 1000)
+    engine : SQLAlchemy engine object, default None
+    schema : str, default None
+        The name of the schema where data is found
+    nbins : tuple, default (50, 50)
         Number of desird bins for x and y directions
     bin_size : tuple, default None
         The size of of the bins for the x and y directions
     print_query : boolean, default False
         If True, print the resulting query
+
+    Returns
+    -------
+    scatterplot_df : DataFrame
     """
 
     def _check_for_input_errors(nbins, bin_size):
@@ -373,11 +409,17 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
 
         return scat_bin_tbl
 
+    if schema is not None and not isinstance(data, str):
+        raise ValueError('schema cannot be specified unless data is of string type.')
+    if isinstance(data, str):
+        metadata = MetaData(engine)
+        data = Table(data, metadata, autoload=True, schema=schema)
+
     _check_for_input_errors(nbins, bin_size)
-    is_category_x = _is_category_column(table_obj, column_name_x)
-    is_category_y = _is_category_column(table_obj, column_name_y)
-    is_time_type_x = _is_time_type(table_obj, column_name_x)
-    is_time_type_y = _is_time_type(table_obj, column_name_y)
+    is_category_x = _is_category_column(data, column_name_x)
+    is_category_y = _is_category_column(data, column_name_y)
+    is_time_type_x = _is_time_type(data, column_name_x)
+    is_time_type_y = _is_time_type(data, column_name_y)
 
     if is_category_x and is_category_y:
         binned_table =\
@@ -385,7 +427,7 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
                     column(column_name_y).label('category_y'),
                     func.count('*').label('freq')
                    ],
-                   from_obj=table_obj
+                   from_obj=data
                    )\
             .group_by(column_name_x, column_name_y)\
             .order_by(column_name_x, column_name_y)
@@ -404,13 +446,13 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
         max_val_y = column('max_val_y')
         col_val_y = column(column_name_y)
 
-        min_max_tbl_x = _get_min_max_table(table_obj,
+        min_max_tbl_x = _get_min_max_alias(data,
                                            column_name_x,
                                            'min_max_table_x',
                                            min_val_x.name,
                                            max_val_x.name
                                           )
-        min_max_tbl_y = _get_min_max_table(table_obj,
+        min_max_tbl_y = _get_min_max_alias(data,
                                            column_name_y,
                                            'min_max_table_y',
                                            min_val_y.name,
@@ -442,7 +484,7 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
                     bin_loc_y.cast(Numeric).label('bin_loc_y'),
                     func.count('*').label('freq')
                    ],
-                   from_obj=[table_obj, min_max_tbl_x, min_max_tbl_y]
+                   from_obj=[data, min_max_tbl_x, min_max_tbl_y]
                    )\
             .group_by('bin_loc_x', 'bin_loc_y')\
 
@@ -482,7 +524,8 @@ def get_scatterplot_values(table_obj, column_name_x, column_name_y, engine,
         if print_query:
             print scatterplot_tbl
 
-        return psql.read_sql(scatterplot_tbl, engine)
+        scatterplot_df = psql.read_sql(scatterplot_tbl, engine)
+        return scatterplot_df
 
 
 def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
@@ -1005,7 +1048,7 @@ def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('deep')[0],
     by_opacity : boolean, default True
         If True, then the opacity of each plotted point will be
         proportional to its frequency. A darker bin immplies more data
-        in that bin
+        in that bin.
     marker : str, default 'o'
         matplotlib marker
     """
