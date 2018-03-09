@@ -2,6 +2,8 @@ from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from textwrap import dedent
 
+from impala.sqlalchemy import BIGINT, BOOLEAN, DECIMAL, DOUBLE, FLOAT, INT,\
+                              SMALLINT, STRING, TIMESTAMP, TINYINT
 from IPython.display import display
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -16,8 +18,7 @@ from sqlalchemy import all_, and_, any_, not_, or_
 from sqlalchemy import alias, between, case, cast, column, distinct, extract,\
                        false, func, intersect, literal, literal_column,\
                        select, text, true, union, union_all
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, Float,\
-                       Numeric, String
+from sqlalchemy import CHAR, REAL, VARCHAR
 
 
 
@@ -38,8 +39,8 @@ def _create_weight_percentage(hist_col, normed=False):
 def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
     """Gets the bin locations for a numeric type."""
     # Which bin it should fall into
-    numer = (col_val - min_val).cast(Numeric)
-    denom = (max_val - min_val).cast(Numeric)
+    numer = (col_val - min_val).cast(DOUBLE)
+    denom = (max_val - min_val).cast(DOUBLE)
     bin_nbr = func.floor(numer/denom * nbins)
 
     # Group max value into the last bin. It would otherwise be in a
@@ -59,8 +60,8 @@ def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
 def _get_bin_locs_time(nbins, col_val, min_val, max_val):
     """Gets the bin locations for a time type."""
     # Get the SQL expressions for the time ranges
-    numer = func.extract('EPOCH', col_val - max_val).cast(Numeric)
-    denom = func.extract('EPOCH', min_val - max_val).cast(Numeric)
+    numer = func.extract('EPOCH', col_val - max_val).cast(DOUBLE)
+    denom = func.extract('EPOCH', min_val - max_val).cast(DOUBLE)
 
     # Which bin it should fall into
     bin_nbr = func.floor(numer/denom * nbins)
@@ -97,9 +98,8 @@ def _get_min_max_alias(from_obj, column_name, alias_name, min_val_name,
 def _is_category_column(from_obj, column_name):
     """Returns whether the column is a category."""
     data_type = from_obj.c[column_name].type.__visit_name__
-    numeric_types = ['BIGINT', 'DATE', 'DOUBLE PRECISION', 'INT',
-                     'INTEGER', 'FLOAT', 'NUMERIC', 'TIMESTAMP',
-                     'TIMESTAMP WITHOUT TIME ZONE']
+    numeric_types = ['BIGINT', 'DOUBLE', 'INT', 'FLOAT', 'REAL', 'SMALLINT',
+                     'TIMESTAMP', 'TINYINT']
     return data_type not in numeric_types
 
 
@@ -315,9 +315,9 @@ def get_roc_curve(data, y_true, y_score, engine, schema=None,
     # Compute ROC curve values
     roc_slct =\
         select([distinct(y_score_col).label('thresholds'),
-                (column('num_pos')/column('tot_pos').cast(Numeric))
+                (column('num_pos')/column('tot_pos').cast(DOUBLE))
                     .label('tpr'),
-                (column('num_neg')/column('tot_neg').cast(Numeric))
+                (column('num_neg')/column('tot_neg').cast(DOUBLE))
                     .label('fpr')
                ],
                from_obj=[pre_roc_alias, class_sizes_alias]
@@ -381,10 +381,10 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
         """
 
         bin_range = max_val - min_val
-        bin_loc = column('bin_nbr').cast(Numeric)/nbins * bin_range + min_val
+        bin_loc = column('bin_nbr').cast(DOUBLE)/nbins * bin_range + min_val
 
         bin_loc_tbl =\
-            select([bin_loc.cast(Numeric).label(bin_name)],
+            select([bin_loc.cast(DOUBLE).label(bin_name)],
                    from_obj=[func.generate_series(1, nbins).alias('bin_nbr'),
                              min_max_tbl
                             ]
@@ -479,8 +479,8 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
                                               min_val_y, max_val_y)
 
         binned_table =\
-            select([bin_loc_x.cast(Numeric).label('bin_loc_x'),
-                    bin_loc_y.cast(Numeric).label('bin_loc_y'),
+            select([bin_loc_x.cast(DOUBLE).label('bin_loc_x'),
+                    bin_loc_y.cast(DOUBLE).label('bin_loc_y'),
                     func.count('*').label('freq')
                    ],
                    from_obj=[data, min_max_tbl_x, min_max_tbl_y]
