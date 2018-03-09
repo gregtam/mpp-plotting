@@ -22,10 +22,7 @@ from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, Float,\
 
 
 def _add_weights_column(df_list, normed):
-    """Add the weights column for each DataFrame in a list of
-    DataFrames.
-    """
-
+    """Add the weights column for each DataFrame in df_list."""
     for df in df_list:
         df['weights'] = _create_weight_percentage(df[['freq']], normed)
 
@@ -99,7 +96,7 @@ def _get_min_max_alias(from_obj, column_name, alias_name, min_val_name,
 
 def _is_category_column(from_obj, column_name):
     """Returns whether the column is a category."""
-    data_type = str(from_obj.c[column_name].type)
+    data_type = from_obj.c[column_name].type.__visit_name__
     numeric_types = ['BIGINT', 'DATE', 'DOUBLE PRECISION', 'INT',
                      'INTEGER', 'FLOAT', 'NUMERIC', 'TIMESTAMP',
                      'TIMESTAMP WITHOUT TIME ZONE']
@@ -108,7 +105,7 @@ def _is_category_column(from_obj, column_name):
 
 def _is_time_type(from_obj, column_name):
     """Returns whether the column is a time type (date or timestamp)."""
-    data_type = str(from_obj.c[column_name].type)
+    data_type = from_obj.c[column_name].type.__visit_name__
     time_types = ['DATE', 'TIMESTAMP', 'TIMESTAMP WITHOUT TIME ZONE']
     return data_type in time_types
 
@@ -164,7 +161,8 @@ def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
             raise Exception('bin_width must be positive.')
 
     if schema is not None and not isinstance(data, str):
-        raise ValueError('schema cannot be specified unless data is of string type.')
+        raise ValueError('schema cannot be specified unless data is of string '
+                         'type.')
     if isinstance(data, str):
         metadata = MetaData(engine)
         data = Table(data, metadata, autoload=True, schema=schema)
@@ -275,7 +273,8 @@ def get_roc_curve(data, y_true, y_score, engine, schema=None,
     """
 
     if schema is not None and not isinstance(data, str):
-        raise ValueError('schema cannot be specified unless data is of string type.')
+        raise ValueError('schema cannot be specified unless data is of string '
+                         'type.')
     if isinstance(data, str):
         metadata = MetaData(engine)
         data = Table(data, metadata, autoload=True, schema=schema)
@@ -511,7 +510,6 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
                                )
                  )
 
-
         scatterplot_tbl =\
             select([column('scat_bin_x'),
                     column('scat_bin_y'),
@@ -519,7 +517,6 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
                    ],
                    from_obj=join_table
                   )
-        
     
         if print_query:
             print scatterplot_tbl
@@ -577,7 +574,10 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
             temp_df.columns = ['category', 'freq_{}'.format(i)]
 
             # Add weights column (If normed, we must take this into account)
-            temp_df['weights_{}'.format(i)] = _create_weight_percentage(temp_df['freq_{}'.format(i)], normed)
+            weights_col = 'weights_{}'.format(i)
+            freq_col = 'freq_{}'.format(i)
+            temp_df[weights_col] = _create_weight_percentage(temp_df[freq_col],
+                                                             normed)
 
             if i == 0:
                 df = temp_df
