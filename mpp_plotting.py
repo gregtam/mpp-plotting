@@ -282,45 +282,41 @@ def get_roc_curve(data, y_true, y_score, engine, schema=None,
     y_true_col = column(y_true)
     y_score_col = column(y_score)
 
-    # Add row numbers
-    row_nbr_alias =\
-        select([func.row_number()
-                    .over(order_by=y_score_col)
-               ] + list(data.c)
-              )\
-        .alias('row_nbr')
-
-    # Calculate number of positives and negatives past a given threshold
-    pre_roc_alias =\
-        select(row_nbr_alias.c
-               + [func.sum(y_true_col)
-                      .over(order_by=y_score_col.desc())
-                      .label('num_pos'),
-                  func.sum(1 - y_true_col)
-                      .over(order_by=y_score_col.desc())
-                      .label('num_neg')
-                 ]
-              )\
-        .alias('pre_roc')
-
     # Get the sizes of the positive and negative classes
-    class_sizes_alias =\
+    tot_pos, tot_neg =\
         select([func.sum(y_true_col).label('tot_pos'),
                 func.sum(1 - y_true_col).label('tot_neg')
                ],
                from_obj=data
               )\
-        .alias('class_sizes')
+        .execute()\
+        .fetchone()
+
+    # Calculate number of positives and negatives past a given threshold
+    pre_roc_alias =\
+        select([y_score_col,
+                func.sum(y_true_col)
+                    .over(order_by=y_score_col.desc())
+                    .label('num_pos'),
+                func.sum(1 - y_true_col)
+                    .over(order_by=y_score_col.desc())
+                    .label('num_neg')
+               ],
+               from_obj=data
+              )\
+        .alias('pre_roc')
 
     # Compute ROC curve values
     roc_slct =\
         select([distinct(y_score_col).label('thresholds'),
-                (column('num_pos')/column('tot_pos').cast(DOUBLE))
+                (column('num_pos')/tot_pos)
                     .label('tpr'),
-                (column('num_neg')/column('tot_neg').cast(DOUBLE))
-                    .label('fpr')
+                (column('num_neg')/tot_neg)
+                    .label('fpr'),
+                column('num_pos'),
+                column('num_neg')
                ],
-               from_obj=[pre_roc_alias, class_sizes_alias]
+               from_obj=pre_roc_alias
               )\
         .order_by('tpr', 'fpr')
 
