@@ -7,7 +7,7 @@ This repository includes files that illustrate how to create plots in an MPP dat
 - `MPP Plotting.ipynb`: This file gives examples of how to plot on the order of millions and billions of data from HAWQ or GPDB. This uses functions from `mpp_plotting.py` to summarize the data into manageable pieces. We then use matplotlib to plot these.  
 - `MPP ROC Curve.ipynb`: This file shows how to plot an ROC curve from data in HAWQ or GPDB.
 
-### Python FIles
+### Python Files
 - `credentials.py`: This file includes login information into an MPP database. It is important to keep these separate from the notebook so that login information is not present inside of the notebook.
 
 - `mpp_plotting.py`: This file includes all function definitions for the backend plotting functions.

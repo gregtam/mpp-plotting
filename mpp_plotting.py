@@ -1,7 +1,9 @@
-from datetime import datetime
+from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from textwrap import dedent
 
+from impala.sqlalchemy import BIGINT, BOOLEAN, DECIMAL, DOUBLE, FLOAT, INT,\
+                              SMALLINT, STRING, TIMESTAMP, TINYINT
 from IPython.display import display
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -10,15 +12,18 @@ import pandas as pd
 import pandas.io.sql as psql
 import psycopg2
 import seaborn as sns
+import sqlalchemy
+from sqlalchemy import create_engine, Column, MetaData, Table
+from sqlalchemy import all_, and_, any_, not_, or_
+from sqlalchemy import alias, between, case, cast, column, distinct, extract,\
+                       false, func, intersect, literal, literal_column,\
+                       select, text, true, union, union_all
+from sqlalchemy import CHAR, REAL, VARCHAR
 
-import credentials
 
 
 def _add_weights_column(df_list, normed):
-    """Add the weights column for each DataFrame in a list of
-    DataFrames.
-    """
-
+    """Add the weights column for each DataFrame in df_list."""
     for df in df_list:
         df['weights'] = _create_weight_percentage(df[['freq']], normed)
 
@@ -31,49 +36,118 @@ def _create_weight_percentage(hist_col, normed=False):
         return hist_col
 
 
+def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
+    """Gets the bin locations for a numeric type."""
+    # Which bin it should fall into
+    numer = (col_val - min_val).cast(DOUBLE)
+    denom = (max_val - min_val).cast(DOUBLE)
+    bin_nbr = func.floor(numer/denom * nbins)
+
+    # Group max value into the last bin. It would otherwise be in a
+    # separate bin on its own.
+    bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
+                           else_=bin_nbr - 1
+                          )
+
+    # Scale the bins to their proper size
+    bin_nbr_scaled = bin_nbr_correct/nbins * denom
+    # Translate bins to their proper locations
+    bin_loc = bin_nbr_scaled + min_val
+
+    return bin_loc
+
+
+def _get_bin_locs_time(nbins, col_val, min_val, max_val):
+    """Gets the bin locations for a time type."""
+    # Get the SQL expressions for the time ranges
+    numer = func.extract('EPOCH', col_val - max_val).cast(DOUBLE)
+    denom = func.extract('EPOCH', min_val - max_val).cast(DOUBLE)
+
+    # Which bin it should fall into
+    bin_nbr = func.floor(numer/denom * nbins)
+    # Group max value into the last bin. It would otherwise be in a
+    # separate bin on its own
+    bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
+                           else_=bin_nbr - 1
+                          )
+    # Scale the bins to their proper size
+    bin_nbr_scaled = bin_nbr_correct/nbins * denom
+    # Translate bins to their proper locations
+    bin_loc = bin_nbr_scaled * text("INTERVAL '1 second'") + min_val
+
+    return bin_loc
+
+
+def _get_min_max_alias(from_obj, column_name, alias_name, min_val_name,
+                       max_val_name):
+    """Returns a SQLAlchemy alias that captures the min and max values
+    of a column.
+    """
+
+    min_max_alias =\
+        select([func.min(column(column_name)).label(min_val_name),
+                func.max(column(column_name)).label(max_val_name)
+               ],
+               from_obj=from_obj
+               )\
+        .alias(alias_name)
+
+    return min_max_alias
+
+
+def _is_category_column(from_obj, column_name):
+    """Returns whether the column is a category."""
+    data_type = from_obj.c[column_name].type.__visit_name__
+    numeric_types = ['BIGINT', 'DOUBLE', 'INT', 'FLOAT', 'REAL', 'SMALLINT',
+                     'TIMESTAMP', 'TINYINT']
+    return data_type not in numeric_types
+
+
+def _is_time_type(from_obj, column_name):
+    """Returns whether the column is a time type (date or timestamp)."""
+    data_type = from_obj.c[column_name].type.__visit_name__
+    time_types = ['DATE', 'TIMESTAMP', 'TIMESTAMP WITHOUT TIME ZONE']
+    return data_type in time_types
+
+
 def _listify(df_list, labels):
     """If df_list and labels are DataFrames and strings respectively,
     make them into lists to conform with the rest of the code as it is
     built to handle multiple variables.
     """
 
-    if str(type(df_list)) == "<class 'pandas.core.frame.DataFrame'>":
+    if isinstance(df_list, pd.DataFrame):
         df_list = [df_list]
-    if type(labels) == "<type 'str'>":
+    if isinstance(labels, str):
         labels = [labels]
     return df_list, labels
 
 
-def _separate_schema_table(full_table_name, conn):
-    """Separates schema name and table name."""
-    if '.' in full_table_name:
-        return full_table_name.split('.')
-    else:
-        schema_name = psql.read_sql('SELECT current_schema();', conn).iloc[0, 0]
-        table_name = full_table_name
-        return schema_name, full_table_name
 
-
-
-def get_histogram_values(table_name, column_name, conn, nbins=25,
-                         bin_width=None, cast_as=None, where_clause='',
-                         print_query=False):
+def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
+                         bin_width=None, cast_as=None, print_query=False):
     """Takes a SQL table and creates histogram bin heights. Relevant
     parameters are either the number of bins or the width of each bin.
     Only one of these is specified. The other one must be left at its
     default value of 0 or it will throw an error.
     
-    Inputs:
-    table_name - Name of the table in SQL. Input can also include have
-                 the schema name prepended, with a '.', e.g.,
-                 'schema_name.table_name'
-    column_name - Name of the column of interest
-    conn - A psycopg2 connection object
-    nbins - Number of desired bins (Default: 25)
-    bin_width - Width of each bin (Default: None)
-    cast_as - SQL type to cast as
-    where_clause - A SQL where clause specifying any filters
-    print_query - If True, print the resulting query.
+    Parameters
+    ----------
+    data : str or SQLAlchemy selectable
+        The table we wish to compute a histogram with
+    column_name : str
+        Name of the column of interest
+    engine : SQLAlchemy engine object
+    schema : str, default None
+        The name of the schema where data is found
+    nbins : int, default 25
+        Number of desired bins
+    bin_width : int, default None
+        Width of each bin. If None, then use nbins to define bin width.
+    cast_as : SQLAlchemy data type, default None
+        SQL type to cast as
+    print_query : boolean, default False
+        If True, print the resulting query
     """
 
     def _check_for_input_errors(nbins, bin_width):
@@ -85,189 +159,84 @@ def get_histogram_values(table_name, column_name, conn, nbins=25,
             raise Exception('nbins must be positive.')
         if bin_width is not None and bin_width < 0:
             raise Exception('bin_width must be positive.')
-    
-    def _get_column_information(full_table_name, column_name, conn):
-        """Get column name and data type information."""
-        schema_name, table_name =  _separate_schema_table(full_table_name,
-                                                          conn
-                                                         )
 
-        sql = '''
-        SELECT column_name, data_type
-          FROM information_schema.columns
-         WHERE table_schema = '{schema_name}'
-           AND table_name = '{table_name}'
-           AND column_name = '{column_name}'
-        '''.format(schema_name=schema_name,
-                   table_name=table_name,
-                   column_name=column_name
-                  )
-        
-        return psql.read_sql(sql, conn)
-    
-    def _is_column_category(table_name, column_name, info_df):
-        """Returns whether the column is a category."""
-        if column_name in info_df['column_name'].tolist():
-            if cast_as is None:
-                # If it's text type, return True
-                return (info_df[info_df.column_name == column_name]['data_type'] == 'text')[0]
-            elif cast_as.upper() in ['TIMESTAMP', 'DATE', 'INT', 'FLOAT', 'NUMERIC']:
-                # If we want to cast it to a number
-                return False
-            else:
-                return True
-        else:
-            raise Exception('{} is not found in the table {}'
-                                .format(column_name, table_name))
+    if schema is not None and not isinstance(data, str):
+        raise ValueError('schema cannot be specified unless data is of string '
+                         'type.')
+    if isinstance(data, str):
+        metadata = MetaData(engine)
+        data = Table(data, metadata, autoload=True, schema=schema)
 
-    def _is_time_type(table_name, column_name, info_df):
-        """Returns whether the column is a time type (date or timestamp)."""
-        if column_name in info_df['column_name'].tolist():
-            return (info_df[info_df.column_name == column_name]['data_type']
-                        .isin(['date', 'timestamp']))[0]
-        else:
-            raise Exception(column_name + ' is not found in the table ' + table_name)
-
-    def _get_cast_string(cast_as):
-        """If cast_as is specified, we must create a cast string to
-        recast our columns. If not, we set it as a blank string.
-        """
-
-        if cast_as is None:
-            return ''
-        else:
-            return '::' + cast_as.upper()
-
-    def _min_max_value(column_name, conn):
-        sql = '''
-        SELECT MIN({col_name}{cast_as}), MAX({col_name}{cast_as})
-          FROM {table_name}
-         {where_clause};
-        '''.format(col_name = column_name,
-                   cast_as = cast_string,
-                   table_name = table_name,
-                   where_clause = where_clause
-                  )
-        return tuple(psql.read_sql(sql, conn).iloc[0])
-    
     _check_for_input_errors(nbins, bin_width)
-    info_df = _get_column_information(table_name, column_name, conn)
-    is_time_type = _is_time_type(table_name, column_name, info_df)
-    is_category = _is_column_category(table_name, column_name, info_df)
-    cast_string = _get_cast_string(cast_as)
+    is_category = _is_category_column(data, column_name)
+    is_time_type = _is_time_type(data, column_name)
 
     if is_category:
-        sql = '''
-        SELECT {column_name} AS category, COUNT(*) AS freq
-          FROM {table_name}
-         GROUP BY {column_name}
-         ORDER BY COUNT(*) DESC;
-        '''.format(column_name=column_name, table_name=table_name)
-    elif is_time_type:
-        # Get min and max value of the column
-        min_val, max_val = _min_max_value(column_name, conn)
-        
-        # Get the span of the column
-        span_value = max_val - min_val
-        if bin_width is not None:
-            # If bin width is specified, calculate nbins
-            # from it.
-            nbins = span_value/bin_width
-
-        sql = '''
-          WITH min_max_table AS
-               (SELECT MIN({column_name}) AS min_val,
-                       MAX({column_name}) AS max_val
-                  FROM {table_name}
-                 {where_clause}
-               ),
-               binned_table AS
-               (SELECT FLOOR(EXTRACT(EPOCH FROM {column_name}::TIMESTAMP - min_val::TIMESTAMP)
-                             /EXTRACT(EPOCH FROM max_val::TIMESTAMP - min_val::TIMESTAMP)
-                             * {nbins}
-                            )
-                       /{nbins} * EXTRACT(EPOCH FROM max_val::TIMESTAMP - min_val::TIMESTAMP) * INTERVAL '1 SECOND'
-                       + min_val::TIMESTAMP AS bin_nbr
-                  FROM {table_name}
-                       CROSS JOIN min_max_table
-               )
-        SELECT bin_nbr, COUNT(*) AS freq
-          FROM binned_table
-         GROUP BY bin_nbr
-         ORDER BY bin_nbr;
-        '''.format(column_name = column_name,
-                   nbins = nbins,
-                   table_name = table_name,
-                   where_clause = where_clause
-                  )
-
+        binned_slct =\
+            select([column(column_name).label('category'),
+                    func.count('*').label('freq')
+                   ],
+                   from_obj=data
+                  )\
+            .group_by(column_name)\
+            .order_by(column_name)
     else:
-        # Get min and max value of the column
-        min_val, max_val = _min_max_value(column_name, conn)
+        # Get column variables
+        min_val = column('min_val')
+        max_val = column('max_val')
+        col_val = column(column_name)
         
-        # Get the span of the column
-        span_value = max_val - min_val
+        # Table to get min and max value
+        min_max_alias = _get_min_max_alias(data,
+                                           column_name,
+                                           'min_max_table',
+                                           min_val.name,
+                                           max_val.name
+                                          )
+
         if bin_width is not None:
-            # If bin width is specified, calculate nbins
-            # from it.
-            nbins = span_value/bin_width
-        
-        # Form the SQL statement. We must be careful if the value is the
-        # maximum value within the column because it might end up in a
-        # bucket on its own since this is the only case where the floor
-        # function is exactly equal to 1.
-        sql = '''
-          WITH min_max_table AS
-               (SELECT MIN({column_name}{cast_as}) AS min_val,
-                       MAX({column_name}{cast_as}) AS max_val
-                  FROM {table_name}
-                 {where_clause}
-               ),
-               binned_table AS
-               (SELECT CASE WHEN {column_name}{cast_as} < max_val
-                                 THEN FLOOR(({column_name}{cast_as} - min_val)::NUMERIC
-                                            /(max_val - min_val)
-                                            * {nbins}
-                                           )
-                                      /{nbins} * (max_val - min_val) 
-                                      + min_val
-                            WHEN {column_name}{cast_as} = max_val
-                                 THEN ({nbins} - 1)::NUMERIC/{nbins} * (max_val - min_val) 
-                                      + min_val
-                            ELSE NULL
-                             END AS bin_nbr
-                  FROM {table_name}
-                       CROSS JOIN min_max_table
-                 {where_clause}
-               )
-        SELECT bin_nbr, COUNT(*) AS freq
-          FROM binned_table
-         GROUP BY bin_nbr
-         ORDER BY bin_nbr;
-        '''.format(column_name = column_name,
-                   cast_as = cast_string,
-                   nbins = nbins,
-                   table_name = table_name,
-                   where_clause = where_clause
-                  )
+            # If bin width is not specified, calculate nbins from it.
+            nbins = (max_val - min_val)/bin_width
+
+        if is_time_type:
+            bin_loc = _get_bin_locs_time(nbins, col_val, min_val, max_val)
+        else:
+            bin_loc = _get_bin_locs_numeric(nbins, col_val, min_val, max_val)
+
+        # Group by the bin locations
+        binned_slct =\
+            select([bin_loc.label('bin_loc'),
+                    func.count('*').label('freq')
+                   ], 
+                   from_obj=[data, min_max_alias]
+                  )\
+            .group_by('bin_loc')\
+            .order_by('bin_loc')
 
     if print_query:
-        print dedent(sql)
+        print binned_slct
 
-    return psql.read_sql(sql, conn)
+    return psql.read_sql(binned_slct, engine)
 
 
 def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
-    """Given an ROC DataFrame such as the one created in get_roc_values,
+    """Given an ROC DataFrame such as the one created in get_roc_curve,
     return the AUC. This is achieved by taking the ROC curve and 
     interpolating every single point with a straight line and computing
     the sum of the areas of all the trapezoids.
 
-    Inputs:
-    roc_df - A DataFrame with columns for true positive rate and false
-             positive rate
-    tpr_column - Name of the true positive rate column (Default: 'tpr')
-    fpr_column - Name of the false positive rate column (Default: 'fpr')
+    Parameters
+    ----------
+    roc_df : DataFrame
+        Contains the columns for true positive and false positive rates
+    tpr_column : str, default 'tpr'
+        Name of the true positive rate column
+    fpr_column : str, default 'fpr'
+        Name of the false positive rate column
+
+    Returns
+    -------
+    auc_val : float
     """
 
     # The average of the two consecutive tprs
@@ -275,81 +244,117 @@ def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
     # The width (i.e., distance between two consecutive fprs)
     width = roc_df[fpr_column].diff()[1:]
 
-    return sum(avg_height * width)
+    auc_val = sum(avg_height * width)
+    return auc_val
 
 
-def get_roc_values(table_name, y_true, y_score, conn, print_query=False):
+def get_roc_curve(data, y_true, y_score, engine, schema=None,
+                  print_query=False):
     """Computes the ROC curve in database.
 
-    Inputs:
-    table_name - The name of the table that includes predicted and true
-                 values
-    y_true - The name of the column that contains the true values
-    y_score - The name of the column that contains the scores of the
-              machine learning algorithm
-    conn - A psycopg2 connection object
-    print_query - If True, print the resulting query.
+    Parameters
+    ----------
+    data : str or SQLAlchemy selectable
+        The table we wish to compute a histogram with
+    y_true : str
+        Name of the column that contains the true values
+    y_score: str
+        Name of the column that contains the scores from the machine
+        learning algorithm
+    engine : SQLAlchemy engine object
+    schema : str, default None
+        The name of the schema where data is found
+    print_query : boolean, default False
+        If True, print the resulting query
+
+    Returns
+    -------
+    roc_df : DataFrame
     """
 
-    sql = '''
-      WITH row_num_table AS
-           (SELECT row_number()
-                       OVER (ORDER BY {y_score}) AS row_num,
-                   *
-              FROM {table_name}
-           ),
-           pre_roc AS 
-           (SELECT *,
-                   SUM({y_true})
-                       OVER (ORDER BY {y_score} DESC) AS num_pos,
-                   SUM(1 - {y_true})
-                       OVER (ORDER BY {y_score} DESC) AS num_neg
-              FROM row_num_table
-           ),
-           class_sizes AS
-           (SELECT SUM({y_true}) AS tot_pos,
-                   SUM(1 - {y_true}) AS tot_neg
-              FROM {table_name}
-           )
-    SELECT DISTINCT
-           {y_score} AS thresholds,
-           num_pos/tot_pos::NUMERIC AS tpr,
-           num_neg/tot_neg::NUMERIC AS fpr
-      FROM pre_roc
-           CROSS JOIN class_sizes
-     ORDER BY tpr, fpr;
-    '''.format(table_name=table_name, y_true=y_true, y_score=y_score)
+    if schema is not None and not isinstance(data, str):
+        raise ValueError('schema cannot be specified unless data is of string '
+                         'type.')
+    if isinstance(data, str):
+        metadata = MetaData(engine)
+        data = Table(data, metadata, autoload=True, schema=schema)
 
-    if print_query:
-        print dedent(sql)
+    y_true_col = column(y_true)
+    y_score_col = column(y_score)
 
-    return psql.read_sql(sql, conn)
+    # Get the sizes of the positive and negative classes
+    tot_pos, tot_neg =\
+        select([func.sum(y_true_col).label('tot_pos'),
+                func.sum(1 - y_true_col).label('tot_neg')
+               ],
+               from_obj=data
+              )\
+        .execute()\
+        .fetchone()
+
+    # Calculate number of positives and negatives past a given threshold
+    pre_roc_alias =\
+        select([y_score_col,
+                func.sum(y_true_col)
+                    .over(order_by=y_score_col.desc())
+                    .label('num_pos'),
+                func.sum(1 - y_true_col)
+                    .over(order_by=y_score_col.desc())
+                    .label('num_neg')
+               ],
+               from_obj=data
+              )\
+        .alias('pre_roc')
+
+    # Compute ROC curve values
+    roc_slct =\
+        select([distinct(y_score_col).label('thresholds'),
+                (column('num_pos')/tot_pos)
+                    .label('tpr'),
+                (column('num_neg')/tot_neg)
+                    .label('fpr'),
+                column('num_pos'),
+                column('num_neg')
+               ],
+               from_obj=pre_roc_alias
+              )\
+        .order_by('tpr', 'fpr')
+
+    roc_df = psql.read_sql(roc_slct, engine)
+    return roc_df
 
 
-def get_scatterplot_values(table_name, column_name_x, column_name_y, conn,
-                           nbins=(1000, 1000), bin_size=None, cast_x_as=None,
-                           cast_y_as=None, print_query=False):
-    """ Takes a SQL table and creates scatter plot bin values. This is
+def get_scatterplot_values(data, column_name_x, column_name_y, engine,
+                           schema=None, nbins=(50, 50), bin_size=None,
+                           cast_x_as=None, cast_y_as=None, print_query=False):
+    """Takes a SQL table and creates scatter plot bin values. This is
     the 2D version of get_histogram_values. Relevant parameters are
     either the number of bins or the size of each bin in both the x and
     y direction. Only number of bins or size of the bins is specified.
     The other pair must be left at its default value of 0 or it will
     throw an error.
     
-    Inputs:
-    table_name - Name of the table in SQL. Input can also include have
-                 the schema name prepended, with a '.', e.g.,
-                 'schema_name.table_name'
-    column_name_x - Name of one column of interest to be plotted
-    column_name_y - Name of another column of interest to be plotted
-    conn - A psycopg2 connection object
-    column_name - Name of the column of interest
-    nbins - Number of desired bins for x and y directions
-            (Default: (0, 0))
-    bin_size - Size of each bin for x and y directions (Default: (0, 0))
-    cast_x_as - SQL type to cast x as
-    cast_y_as - SQL type to cast y as
-    print_query - If True, print the resulting query.
+    Parameters
+    ----------
+    data : str or SQLAlchemy selectable
+        The table we wish to compute a histogram with
+    column_name_x : str
+        Name of one column of interest to be plotted
+    column_name_t : str
+        Name of another column of interest to be plotted
+    engine : SQLAlchemy engine object, default None
+    schema : str, default None
+        The name of the schema where data is found
+    nbins : tuple, default (50, 50)
+        Number of desird bins for x and y directions
+    bin_size : tuple, default None
+        The size of of the bins for the x and y directions
+    print_query : boolean, default False
+        If True, print the resulting query
+
+    Returns
+    -------
+    scatterplot_df : DataFrame
     """
 
     def _check_for_input_errors(nbins, bin_size):
@@ -363,141 +368,157 @@ def get_scatterplot_values(table_name, column_name_x, column_name_y, conn,
         elif nbins is not None:
             if nbins[0] < 0 or nbins[1] < 0:
                 raise Exception('Number of bin dimensions must both be positive')
-    
-    def _get_cast_string(cast_as_x, cast_as_y):
-        """If cast_as_x and/or cast_as_y are specified, we must create a
-        cast string to recast our columns. If not, we set it as a blank
-        string.
+
+    def _get_bin_loc_tbl(min_max_tbl, nbins, bin_name, min_val, max_val):
+        """Gets all bin locations for a numeric type, including for bins
+        that do not contain any data. This is used for scatter plot
+        heatmaps where we will need to fill it in. Regular scatter plots
+        do not need since this we perform a simple group by.
         """
 
-        if cast_x_as is None:
-            cast_x_string = ''
-        else:
-            cast_x_string = '::' + cast_x_as.upper()
-            
-        if cast_y_as is None:
-            cast_y_string = ''
-        else:
-            cast_y_string = '::' + cast_y_as.upper()
+        bin_range = max_val - min_val
+        bin_loc = column('bin_nbr').cast(DOUBLE)/nbins * bin_range + min_val
 
-        return cast_x_string, cast_y_string
+        bin_loc_tbl =\
+            select([bin_loc.cast(DOUBLE).label(bin_name)],
+                   from_obj=[func.generate_series(1, nbins).alias('bin_nbr'),
+                             min_max_tbl
+                            ]
+                  )
 
-    def _min_max_value(table_name, column_name, cast_as):
-        """Get the min and max value of a specified column."""
-        sql = '''
-        SELECT MIN({col_name}{cast_as}), MAX({col_name}{cast_as})
-          FROM {table_name};
-        '''.format(col_name=column_name, table_name=table_name, cast_as=cast_as)
+        return bin_loc_tbl
 
-        return tuple(psql.read_sql(sql, conn).iloc[0])
-     
+    def _get_scat_bin_tbl(bin_loc_tbl_x, bin_loc_tbl_y):
+        """Gets the scatter plot bin location pairs."""
 
-    schema_name, table_name = _separate_schema_table(table_name, conn)
+        bin_loc_tbl_x_alias = bin_loc_tbl_x.alias('bin_loc_x')
+        bin_loc_tbl_y_alias = bin_loc_tbl_y.alias('bin_loc_y')
+
+        scat_bin_tbl =\
+            select(bin_loc_tbl_x_alias.c + bin_loc_tbl_y_alias.c,
+                   from_obj=[bin_loc_tbl_x_alias,
+                             bin_loc_tbl_y_alias
+                            ]
+                  )\
+            .alias('scat_bin_tbl')
+
+        return scat_bin_tbl
+
+    if schema is not None and not isinstance(data, str):
+        raise ValueError('schema cannot be specified unless data is of string type.')
+    if isinstance(data, str):
+        metadata = MetaData(engine)
+        data = Table(data, metadata, autoload=True, schema=schema)
+
     _check_for_input_errors(nbins, bin_size)
-    cast_x_string, cast_y_string = _get_cast_string(cast_x_as, cast_y_as)
+    is_category_x = _is_category_column(data, column_name_x)
+    is_category_y = _is_category_column(data, column_name_y)
+    is_time_type_x = _is_time_type(data, column_name_x)
+    is_time_type_y = _is_time_type(data, column_name_y)
 
-    # Get the min and max values for x and y directions
-    min_val_x, max_val_x = _min_max_value(table_name,
-                                          column_name_x,
-                                          cast_as=cast_x_string
-                                         )
-    min_val_y, max_val_y = _min_max_value(table_name,
-                                          column_name_y,
-                                          cast_as=cast_y_string
-                                         )
+    if is_category_x and is_category_y:
+        binned_table =\
+            select([column(column_name_x).label('category_x'),
+                    column(column_name_y).label('category_y'),
+                    func.count('*').label('freq')
+                   ],
+                   from_obj=data
+                   )\
+            .group_by(column_name_x, column_name_y)\
+            .order_by(column_name_x, column_name_y)
+
+        if print_query:
+            print binned_table
+
+        return psql.read_sql(binned_table, engine)
+
+    elif not is_category_x and not is_category_y:
+        min_val_x = column('min_val_x')
+        max_val_x = column('max_val_x')
+        col_val_x = column(column_name_x)
+
+        min_val_y = column('min_val_y')
+        max_val_y = column('max_val_y')
+        col_val_y = column(column_name_y)
+
+        min_max_tbl_x = _get_min_max_alias(data,
+                                           column_name_x,
+                                           'min_max_table_x',
+                                           min_val_x.name,
+                                           max_val_x.name
+                                          )
+        min_max_tbl_y = _get_min_max_alias(data,
+                                           column_name_y,
+                                           'min_max_table_y',
+                                           min_val_y.name,
+                                           max_val_y.name
+                                          )
+
+        if bin_size is not None:
+            # If bin size is not specified, calculated nbins_x and
+            # nbins_y from it.
+            nbins[0] = (max_val_x - min_val_x)/bin_size[0]
+            nbins[1] = (may_val_y - min_val_y)/bin_size[1]
+
+        if is_time_type_x:
+            bin_loc_x = _get_bin_locs_time(nbins[0], col_val_x,
+                                           min_val_x, max_val_x)
+        else:
+            bin_loc_x = _get_bin_locs_numeric(nbins[0], col_val_x,
+                                              min_val_x, max_val_x)
+
+        if is_time_type_y:
+            bin_loc_y = _get_bin_locs_time(nbins[1], col_val_y,
+                                           min_val_y, max_val_y)
+        else:
+            bin_loc_y = _get_bin_locs_numeric(nbins[1], col_val_y,
+                                              min_val_y, max_val_y)
+
+        binned_table =\
+            select([bin_loc_x.cast(DOUBLE).label('bin_loc_x'),
+                    bin_loc_y.cast(DOUBLE).label('bin_loc_y'),
+                    func.count('*').label('freq')
+                   ],
+                   from_obj=[data, min_max_tbl_x, min_max_tbl_y]
+                   )\
+            .group_by('bin_loc_x', 'bin_loc_y')\
+
+        bin_loc_tbl_x = _get_bin_loc_tbl(min_max_tbl_x,
+                                         nbins[0],
+                                         'scat_bin_x',
+                                         min_val_x,
+                                         max_val_x
+                                        )
+        bin_loc_tbl_y = _get_bin_loc_tbl(min_max_tbl_y,
+                                         nbins[1],
+                                         'scat_bin_y',
+                                         min_val_y,
+                                         max_val_y
+                                        )
+        scat_bin_tbl = _get_scat_bin_tbl(bin_loc_tbl_x, bin_loc_tbl_y)
+        
+        join_table =\
+            scat_bin_tbl.alias('scat_bin_table')\
+            .join(binned_table.alias('binned_table'),
+                  isouter=True,
+                  onclause=and_(column('bin_loc_x') == column('scat_bin_x'),
+                                column('bin_loc_y') == column('scat_bin_y')
+                               )
+                 )
+
+        scatterplot_tbl =\
+            select([column('scat_bin_x'),
+                    column('scat_bin_y'),
+                    func.coalesce(column('freq'), 0).label('freq')
+                   ],
+                   from_obj=join_table
+                  )
     
-    # Get the span of values in the x and y direction
-    span_values = (max_val_x - min_val_x, max_val_y - min_val_y)
-    
-    # Since the bins are generated using nbins, if only bin_size is
-    # specified, we can back calculate the number of bins that will be
-    # used.
-    if bin_size is not None:
-        nbins = [float(i)/j for i, j in zip(span_values, bin_size)]
+        if print_query:
+            print scatterplot_tbl
 
-    sql = '''
-    DROP TABLE IF EXISTS binned_table_temp;
-    CREATE TABLE binned_table_temp
-       AS SELECT FLOOR(({x_col}{cast_x_as} - {min_val_x})
-                             /({max_val_x} - {min_val_x}) 
-                             * {nbins_x}
-                        )
-                       /{nbins_x} * ({max_val_x} - {min_val_x}) 
-                       + {min_val_x} AS bin_nbr_x,
-                   FLOOR(({y_col}{cast_y_as} - {min_val_y})
-                             /({max_val_y} - {min_val_y}) 
-                             * {nbins_y}
-                        )
-                       /{nbins_y} * ({max_val_y} - {min_val_y}) 
-                       + {min_val_y} AS bin_nbr_y
-              FROM {table_name}
-             WHERE {x_col} IS NOT NULL
-               AND {y_col} IS NOT NULL;
-
-    DROP TABLE IF EXISTS scatter_bins_temp;
-    CREATE TABLE scatter_bins_temp
-       AS SELECT *
-              FROM (SELECT x::NUMERIC/{nbins_x} * ({max_val_x} - {min_val_x})
-                               + {min_val_x} AS scat_bin_x
-                     FROM generate_series(1, {nbins_x}) AS x
-                   ) AS foo_x
-                   CROSS JOIN (SELECT y::NUMERIC/{nbins_y} * ({max_val_y} - {min_val_y})
-                                          + {min_val_y} AS scat_bin_y
-                                 FROM generate_series(1, {nbins_y}) AS y 
-                              ) AS foo_y;
-
-      WITH binned_table AS
-           (SELECT FLOOR(({x_col}{cast_x_as} - {min_val_x})
-                             /({max_val_x} - {min_val_x}) 
-                             * {nbins_x}
-                        )
-                       /{nbins_x} * ({max_val_x} - {min_val_x}) 
-                       + {min_val_x} AS bin_nbr_x,
-                   FLOOR(({y_col}{cast_y_as} - {min_val_y})
-                             /({max_val_y} - {min_val_y}) 
-                             * {nbins_y}
-                        )
-                       /{nbins_y} * ({max_val_y} - {min_val_y}) 
-                       + {min_val_y} AS bin_nbr_y
-              FROM {table_name}
-             WHERE {x_col} IS NOT NULL
-               AND {y_col} IS NOT NULL
-           ),
-           scatter_bins AS
-           (SELECT *
-              FROM (SELECT x::NUMERIC/{nbins_x} * ({max_val_x} - {min_val_x})
-                               + {min_val_x} AS scat_bin_x
-                     FROM generate_series(0, {nbins_x}) AS x
-                   ) AS foo_x
-                   CROSS JOIN (SELECT y::NUMERIC/{nbins_y} * ({max_val_y} - {min_val_y})
-                                          + {min_val_y} AS scat_bin_y
-                                 FROM generate_series(0, {nbins_y}) AS y 
-                              ) AS foo_y
-           )
-    SELECT scat_bin_x, scat_bin_y, COUNT(bin_nbr_x) AS freq
-      FROM binned_table
-           RIGHT JOIN scatter_bins
-                   ON ROUND(bin_nbr_x::NUMERIC, 6) = ROUND(scat_bin_x::NUMERIC, 6)
-                  AND ROUND(bin_nbr_y::NUMERIC, 6) = ROUND(scat_bin_y::NUMERIC, 6)
-     GROUP BY scat_bin_x, scat_bin_y
-     ORDER BY scat_bin_x, scat_bin_y;
-    '''.format(x_col = column_name_x,
-               cast_x_as = cast_x_string,
-               y_col = column_name_y,
-               cast_y_as = cast_y_string,
-               min_val_x = min_val_x - 1e-8,
-               max_val_x = max_val_x + 1e-8,
-               min_val_y = min_val_y - 1e-8,
-               max_val_y = max_val_y + 1e-8,
-               nbins_x = nbins[0],
-               nbins_y = nbins[1],
-               table_name = table_name
-              )
-    
-    if print_query:
-        print dedent(sql)
-
-    return psql.read_sql(sql, conn)
+        scatterplot_df = psql.read_sql(scatterplot_tbl, engine)
+        return scatterplot_df
 
 
 def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
@@ -505,34 +526,36 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
                            color_palette=sns.color_palette('deep')):
     """Plots categorical histograms.
     
-    Inputs:
-    df_list - A pandas DataFrame or a list of DataFrames which have two
-              columns (bin_nbr and freq). The bin_nbr is the value of 
-              the histogram bin and the frequency is how many values 
-              fall in that bin.
-    labels - A string (for one histogram) or list of strings which sets 
-             the labels for the histograms
-    log - Boolean of whether to display y axis on log scale
-          (Default: False)
-    normed - Boolean of whether to normalize histograms so that the 
-             heights of each bin sum up to 1. This is useful for 
-             plotting columns with difference sizes (Default: False)
-    null_at - Which side to set a null value column. The options are:
-              'left' - Put the null on the left side
-              'order' - Leave it in its respective order
-              'right' - Put it on the right side
-              '' - If left blank, leave out              
-              (Default: order)
-    order_by - How to order the bars. The options are:
-               'alphetical' - Orders the categories in alphabetical
-                            order
-               integer - an integer value denoting for which df_list
-                         DataFrame to sort by
-    ascending - Boolean of whether to sort values in ascending order 
-                (Default: False)
-    color_palette - Seaborn colour palette, i.e., a list of tuples
-                    representing the colours. 
-                    (Default: sns deep color palette)
+    Parameters
+    ----------
+    df_list : A DataFrame or a list of DataFrames
+        DataFrame or list of DataFrames which have two columns
+        category and freq). Category is the unique value of the column
+        and the frequency is how many values fall in that bin.
+    labels : str or list of str
+        A string (for one histogram) or list of strings which sets the
+        labels for the histograms
+    log : bool, default False
+        Whether to display y axis on log scale
+    normed : bool, default False
+        Whether to normalize histograms so that the heights of each bin
+        sum up to 1. This is useful for plotting columns with different
+        sizes
+    null_at : str, default 'order'
+        Which side to set a null value column. The options are:
+            'left' - Put the null on the left side
+            'right' - Put it on the right side
+            '' - If left blank, leave out
+    order_by : {'alphabetical', int}, default 0
+        How to order the bars. The options are:
+            'alphabetical' - Orders the categories in alphabetical order
+            integer - An integer value denoting for which df_list
+                DataFrame to sort by
+    ascending : bool, default False
+        Whether to sort values in ascending order
+    color_palette : list of tuples, default sns deep colour palette
+        Seaborn colour palette, i.e., a list of tuples representing the
+        colours.
     """
 
     def _join_freq_df(df_list):
@@ -542,12 +565,15 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         Returns the joined DataFrame
         """
 
-        for i in range(len(df_list)):
+        for i in xrange(len(df_list)):
             temp_df = df_list[i].copy()
             temp_df.columns = ['category', 'freq_{}'.format(i)]
 
             # Add weights column (If normed, we must take this into account)
-            temp_df['weights_{}'.format(i)] = _create_weight_percentage(temp_df['freq_{}'.format(i)], normed)
+            weights_col = 'weights_{}'.format(i)
+            freq_col = 'freq_{}'.format(i)
+            temp_df[weights_col] = _create_weight_percentage(temp_df[freq_col],
+                                                             normed)
 
             if i == 0:
                 df = temp_df
@@ -575,7 +601,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
             return hist_df\
                 .sort_values('category', ascending=ascending)\
                 .reset_index(drop=True)
-        elif str(type(order_by)) == "<type 'int'>":
+        elif isinstance(order_by, int):
             # Desired column in the hist_df DataFrame
             weights_col = 'weights_{}'.format(order_by)
 
@@ -690,6 +716,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
                     color=color_palette[i])
 
     def _plot_xticks(loc, bin_left, hist_df):
+        """Plots the xtick labels."""
         # If there are any NULL categories
         if np.sum(hist_df.category.isnull()) > 0:
             if loc == 'left':
@@ -741,21 +768,38 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
     num_hists = len(df_list)
     num_categories = _get_num_categories(hist_df)
 
-    bin_left, null_bin_left = _get_bin_left(null_at, hist_df)
-    bin_height, null_bin_height = _get_bin_height(null_at, order_by, hist_df)
-    bin_width = _get_bin_width(num_hists)
+    hist_df.set_index('category', inplace=True)
 
-    # Plotting functions
-    _plot_all_histograms(bin_left,
-                         bin_height,
-                         null_bin_left,
-                         null_bin_height,
-                         bin_width
-                        )
-    _plot_xticks(null_at, bin_left, hist_df)
+    # Normalize
+    if normed:
+        col_type = 'weights'
+        hist_df = hist_df.filter(regex='weights_[0-9]+')
+    else:
+        col_type = 'freq'
+        hist_df = hist_df.filter(regex='freq_[0-9]+')
 
-    if log:
-        _plot_new_yticks(bin_height)
+    # Get ordering
+    if order_by == 'alphabetical':
+        if null_at == 'left':
+            na_position='first'
+        else:
+            na_position='last'
+
+        if null_at == '':
+            hist_df = hist_df[~hist_df.index.isnull()]
+
+        hist_df.sort_index(ascending=ascending,
+                           na_position=na_position,
+                           inplace=True
+                          )
+
+    elif isinstance(order_by, int):
+        col_name = '{}_{}'.format(col_type, order_by)
+        hist_df.sort_values(col_name, ascending=ascending, inplace=True)
+
+    hist_df.plot(kind='bar', log=log)
+        
+    return hist_df
 
 
 def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
@@ -763,55 +807,62 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
                        color_palette=sns.color_palette('deep')):
     """Plots numerical histograms together.
     
-    Inputs:
-    df_list - A pandas DataFrame or a list of DataFrames which have two
-              columns (bin_nbr and freq). The bin_nbr is the value of
-              the histogram bin and the frequency is how many values
-              fall in that bin.
-    labels - A string (for one histogram) or list of strings which sets
-             the labels for the histograms
-    nbins - The desired number of bins (Default: 25)
-    log - Boolean of whether to display y axis on log scale
-          (Default: False)
-    normed - Boolean of whether to normalize histograms so that the
-             heights of each bin sum up to 1. This is useful for
-             plotting columns with difference sizes (Default: False)
-    null_at - Which side to set a null value column. Options are 'left'
-              or 'right'. Leave it empty to not include (Default: left)
-    color_palette - Seaborn colour palette, i.e., a list of tuples
-                    representing the colours. (Default: sns deep color
-                    palette)
+    Parameters
+    ----------
+    df_list : A DataFrame or a list of DataFrames
+        DataFrame or list of DataFrames which have two columns
+        bin_loc and freq). Bin location marks the edges of the bins
+        and the frequency is how many values fall in each bin.
+    labels : str or list of str
+        A string (for one histogram) or list of strings which sets the
+        labels for the histograms
+    nbins : int, default 25
+        The desired number of bins
+    log : bool, default False
+        Whether to display y axis on log scale
+    normed : bool, default False
+        Whether to normalize histograms so that the heights of each bin
+        sum up to 1. This is useful for plotting columns with different
+        sizes
+    null_at : str, default 'left'
+        Which side to set a null value column. The options are:
+            'left' - Put the null on the left side
+            'right' - Put it on the right side
+            '' - If left blank, leave out
+    color_palette : list of tuples, default sns deep colour palette
+        Seaborn colour palette, i.e., a list of tuples representing the
+        colours.
     """
     
     def _check_for_nulls(df_list):
         """Returns a list of whether each list has a null column."""
-        return [df['bin_nbr'].isnull().any() for df in df_list]
+        return [df.bin_loc.isnull().any() for df in df_list]
 
     def _get_null_weights(has_null, df_list):
-        """ If there are nulls, determine the weights.  Otherwise, set 
+        """If there are nulls, determine the weights.  Otherwise, set 
         weights to 0.
         
         Returns the list of null weights.
         """
 
-        return [float(df[df['bin_nbr'].isnull()].weights)
+        return [float(df[df.bin_loc.isnull()].weights)
                 if is_null else 0 
                 for is_null, df in zip(has_null, df_list)]
 
-    def _get_data_type(bin_nbrs):
+    def _get_data_type(bin_locs):
         """ Returns the data type in the histogram, i.e., whether it is
         numeric or a timetamp. This is important because it determines
         how we deal with the bins.
         """
 
-        if 'float' in str(type(bin_nbrs[0][0])) or 'int' in str(type(bin_nbrs[0][0])):
+        if 'float' in str(type(bin_locs[0][0])) or 'int' in str(type(bin_locs[0][0])):
             return 'numeric'
-        elif str(type(bin_nbrs[0][0])) == "<class 'pandas.tslib.Timestamp'>":
+        elif str(type(bin_locs[0][0])) == "<class 'pandas.tslib.Timestamp'>":
             return 'timestamp'
         else:
-            raise Exception('Bin data type not valid: {}'.format(type(bin_nbrs[0][0])))
+            raise Exception('Bin data type not valid: {}'.format(type(bin_locs[0][0])))
 
-    def _plot_hist(data_type, bin_nbrs, weights, labels, bins, log):
+    def _plot_hist(data_type, bin_locs, weights, labels, bins, log):
         """Plots the histogram for non-null values with corresponding
         labels if provided. This function will take also reduce the
         number of bins in the histogram. This is useful if we want to
@@ -823,10 +874,10 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
         # If the bin type is numeric
         if data_type == 'numeric':
             if len(labels) > 0:
-                _, bins, _ = plt.hist(x=bin_nbrs, weights=weights,
+                _, bins, _ = plt.hist(x=bin_locs, weights=weights,
                                       label=labels, bins=nbins, log=log)
             else:
-                _, bins, _ = plt.hist(x=bin_nbrs, weights=weights, bins=nbins,
+                _, bins, _ = plt.hist(x=bin_locs, weights=weights, bins=nbins,
                                       log=log)
             return bins
 
@@ -835,7 +886,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
             # Since pandas dataframes will convert timestamps and date
             # types to pandas.tslib.Timestamp types, we will need
             # to convert them to datetime since these can be plotted.
-            datetime_list = [dt.to_pydatetime() for dt in bin_nbrs[0]]
+            datetime_list = [dt.to_pydatetime() for dt in bin_locs[0]]
             _, bins, _ = plt.hist(x=datetime_list, weights=weights[0],
                                   bins=nbins, log=log)
             return bins
@@ -905,12 +956,12 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     
     df_list = [df.dropna() for df in df_list]
     weights = [df.weights for df in df_list]
-    bin_nbrs = [df.bin_nbr for df in df_list]
+    bin_locs = [df.bin_loc for df in df_list]
     
-    data_type = _get_data_type(bin_nbrs)
+    data_type = _get_data_type(bin_locs)
 
     # Plot histograms and retrieve bins
-    bin_info = _plot_hist(data_type, bin_nbrs, weights, labels, nbins, log)
+    bin_info = _plot_hist(data_type, bin_locs, weights, labels, nbins, log)
 
     null_bin_width = _get_null_bin_width(data_type, bin_info, num_hists, null_weights)
     null_bin_left = _get_null_bin_left(data_type, null_at, num_hists, bin_info, null_weights)
@@ -919,7 +970,8 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     # If we are plotting NULLS and there are some, plot them and change xticks
     if null_at != '' and np.any(has_null):
         for i in range(num_hists):
-            plt.bar(null_bin_left[i], null_weights[i], null_bin_width, color=color_palette[i], hatch='x')
+            plt.bar(null_bin_left[i], null_weights[i], null_bin_width,
+                    color=color_palette[i], hatch='x')
         if data_type == 'numeric':
             _plot_null_xticks(null_at, bin_info, xticks)
         elif data_type == 'timestamp':
@@ -929,7 +981,8 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
 
 
 def plot_date_hists(df_list, labels=[], nbins=25, log=False, normed=False,
-                    null_at='left', color_palette=sns.color_palette('deep')):
+                    null_at='left',
+                    color_palette=sns.color_palette('colorblind')):
     """Plots histograms by date.
 
     Inputs:
@@ -971,26 +1024,33 @@ def plot_date_hists(df_list, labels=[], nbins=25, log=False, normed=False,
 
 def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('deep')[0],
                      plot_type='scatter', by_size=True, by_opacity=True,
-                     marker='o'):
+                     marker='o', cmap='Blues'):
     """Plots a scatter plot based on the computed scatter plot bins.
 
-    Inputs:
-    scatter_df - a pandas DataFrame which has three columns (scat_bin_x,
-                 scat_bin_y, and freq), where the scat_bin_x and
-                 scat_bin_y are the bins along the x and y axes and freq
-                 is how many values fall in that bin.
-    s - The size of each point (Default: 20)
-    c - The colour of the plot (Default: seaborn deep blue)
-    plot_type - The plot type. Can be either 'scatter' or 'heatmap'.
-                (Default: scatter)
-    by_size - If True, then the size of each plotted point will be
-              proportional to the frequency. Otherwise, it will be a
-              constant size specified by s (Default: True)
-    by_opacity - If True, then the opacity of each plotted point will be
-                 proportional to the frequency. Darker implies more data
-                 in that bin. (Default: True)
-    marker - matplotlib marker to plot (Default: 'o')
+    Parameters
+    ----------
+    scatter_df : DataFrame
+        DataFrame with three columns: scat_bin_x, scat_bin_y, and freq.
+        The columns scat_bin_x and scat_bin_y are the bins along the 
+        x and y axes and freq is how many values fall into the bin.
+    s : int, default 20
+        The size of each point
+    c : tuple or string, default seaborn deep blue
+        The colour of the plot
+    by_size : boolean, default True
+        If True, then the size of each plotted point will be
+        proportional to its frequency. Otherwise, each point will be a
+        constant size specified by s.
+    by_opacity : boolean, default True
+        If True, then the opacity of each plotted point will be
+        proportional to its frequency. A darker bin immplies more data
+        in that bin.
+    marker : str, default 'o'
+        matplotlib marker
     """
+
+    if plot_type not in ['scatter', 'heatmap']:
+        raise ValueError("plot_type must be either 'scatter' or 'heatmap'.")
 
     if plot_type == 'scatter':
         if not by_size and not by_opacity:
@@ -1022,6 +1082,6 @@ def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('deep')[0],
         y = scatter_df['scat_bin_y'].values.reshape(num_x, num_y)
         z = scatter_df['freq'].values.reshape(num_x, num_y) 
 
-        plt.pcolor(x, y, z)
+        plt.pcolor(x, y, z, cmap=cmap)
         plt.xlim(x.min(), x.max())
         plt.ylim(y.min(), y.max())
