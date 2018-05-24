@@ -130,7 +130,7 @@ def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
     parameters are either the number of bins or the width of each bin.
     Only one of these is specified. The other one must be left at its
     default value of 0 or it will throw an error.
-    
+
     Parameters
     ----------
     data : str or SQLAlchemy selectable
@@ -185,7 +185,7 @@ def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
         min_val = column('min_val')
         max_val = column('max_val')
         col_val = column(column_name)
-        
+
         # Table to get min and max value
         min_max_alias = _get_min_max_alias(data,
                                            column_name,
@@ -207,7 +207,7 @@ def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
         binned_slct =\
             select([bin_loc.label('bin_loc'),
                     func.count('*').label('freq')
-                   ], 
+                   ],
                    from_obj=[data, min_max_alias]
                   )\
             .group_by('bin_loc')\
@@ -221,7 +221,7 @@ def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
 
 def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
     """Given an ROC DataFrame such as the one created in get_roc_curve,
-    return the AUC. This is achieved by taking the ROC curve and 
+    return the AUC. This is achieved by taking the ROC curve and
     interpolating every single point with a straight line and computing
     the sum of the areas of all the trapezoids.
 
@@ -333,7 +333,7 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
     y direction. Only number of bins or size of the bins is specified.
     The other pair must be left at its default value of 0 or it will
     throw an error.
-    
+
     Parameters
     ----------
     data : str or SQLAlchemy selectable
@@ -362,12 +362,17 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
         there are issues.
         """
 
+        if schema is not None and not isinstance(data, str):
+            raise ValueError('schema cannot be specified unless data is of '
+                             'string type.')
+
         if bin_size is not None:
             if bin_size[0] < 0 or bin_size[1] < 0:
                 raise Exception('Bin dimensions must both be positive.')
         elif nbins is not None:
             if nbins[0] < 0 or nbins[1] < 0:
-                raise Exception('Number of bin dimensions must both be positive')
+                raise Exception('Number of bin dimensions must both be '
+                                'positive.')
 
     def _get_bin_loc_tbl(min_max_tbl, nbins, bin_name, min_val, max_val):
         """Gets all bin locations for a numeric type, including for bins
@@ -404,8 +409,7 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
 
         return scat_bin_tbl
 
-    if schema is not None and not isinstance(data, str):
-        raise ValueError('schema cannot be specified unless data is of string type.')
+
     if isinstance(data, str):
         metadata = MetaData(engine)
         data = Table(data, metadata, autoload=True, schema=schema)
@@ -496,7 +500,7 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
                                          max_val_y
                                         )
         scat_bin_tbl = _get_scat_bin_tbl(bin_loc_tbl_x, bin_loc_tbl_y)
-        
+
         join_table =\
             scat_bin_tbl.alias('scat_bin_table')\
             .join(binned_table.alias('binned_table'),
@@ -513,7 +517,7 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
                    ],
                    from_obj=join_table
                   )
-    
+
         if print_query:
             print scatterplot_tbl
 
@@ -525,7 +529,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
                            null_at='left', order_by=0, ascending=True,
                            color_palette=sns.color_palette('deep')):
     """Plots categorical histograms.
-    
+
     Parameters
     ----------
     df_list : A DataFrame or a list of DataFrames
@@ -584,17 +588,6 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         for col in df.columns[1:]:
             df[col] = df[col].fillna(0)
         return df
-  
-    def _get_num_categories(hist_df):
-        """Get the number of categories depending on whether we are 
-        specifying to drop it in the function.
-        """
-
-        if null_at == '':
-            return hist_df['category'].dropna().shape[0]
-        else:
-            return hist_df.shape[0]
-   
     def _get_bin_order(loc, hist_df, order_by):
         """Sorts hist_df by the specified order."""
         if order_by == 'alphabetical':
@@ -613,11 +606,21 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         else:
             raise Exception('Invalid order_by')
 
+    def _get_num_categories(hist_df):
+        """Get the number of categories depending on whether we are
+        specifying to drop it in the function.
+        """
+
+        if null_at == '':
+            return hist_df['category'].dropna().shape[0]
+        else:
+            return hist_df.shape[0]
+
     def _get_bin_left(loc, hist_df):
         """Returns a list of the locations of the left edges of the
         bins.
         """
-        
+
         def _get_within_bin_left(hist_df):
             """Each bin has width 1. If there is more than one
             histogram, each one must fit in this bin of width 1, so
@@ -638,13 +641,13 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
 
         # If there are any NULL categories
         if np.sum(hist_df.category.isnull()) > 0:
-            if loc == 'left': 
+            if loc == 'left':
                 bin_left = [np.arange(1 + within_bin_left[i], num_categories + within_bin_left[i]).tolist() for i in range(num_hists)]
                 null_left = [[within_bin_left[i]] for i in range(num_hists)]
             elif loc == 'right':
                 bin_left = [np.arange(within_bin_left[i], num_categories - 1 + within_bin_left[i]).tolist() for i in range(num_hists)]
                 # Subtract one from num_categories since num_categories
-                # includes the null bin. Subtracting will place the null 
+                # includes the null bin. Subtracting will place the null
                 # bin in the proper location.
                 null_left = [[num_categories - 1 + within_bin_left[i]] for i in range(num_hists)]
             elif loc == 'order':
@@ -672,7 +675,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         hist_df_non_null = hist_df[~hist_df.category.isnull()]
 
         # Set the ordering
-        if order_by == 'alphabetical':            
+        if order_by == 'alphabetical':
             hist_df_non_null = hist_df_non_null\
                 .sort_values('category', ascending=ascending)
         else:
@@ -759,7 +762,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
 
 
     df_list, labels = _listify(df_list, labels)
-    # Joins in all the df_list DataFrames so that we can pick a certain 
+    # Joins in all the df_list DataFrames so that we can pick a certain
     # category and retrieve the count for each.
     hist_df = _join_freq_df(df_list)
     # Order them based on specified order
@@ -798,7 +801,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         hist_df.sort_values(col_name, ascending=ascending, inplace=True)
 
     hist_df.plot(kind='bar', log=log)
-        
+
     return hist_df
 
 
@@ -806,7 +809,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
                        null_at='left',
                        color_palette=sns.color_palette('deep')):
     """Plots numerical histograms together.
-    
+
     Parameters
     ----------
     df_list : A DataFrame or a list of DataFrames
@@ -833,20 +836,20 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
         Seaborn colour palette, i.e., a list of tuples representing the
         colours.
     """
-    
+
     def _check_for_nulls(df_list):
         """Returns a list of whether each list has a null column."""
         return [df.bin_loc.isnull().any() for df in df_list]
 
     def _get_null_weights(has_null, df_list):
-        """If there are nulls, determine the weights.  Otherwise, set 
+        """If there are nulls, determine the weights.  Otherwise, set
         weights to 0.
-        
+
         Returns the list of null weights.
         """
 
         return [float(df[df.bin_loc.isnull()].weights)
-                if is_null else 0 
+                if is_null else 0
                 for is_null, df in zip(has_null, df_list)]
 
     def _get_data_type(bin_locs):
@@ -866,7 +869,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
         """Plots the histogram for non-null values with corresponding
         labels if provided. This function will take also reduce the
         number of bins in the histogram. This is useful if we want to
-        apply get_histogram_values for a large number of bins, then 
+        apply get_histogram_values for a large number of bins, then
         experiment with plotting different bin amounts using the
         histogram values.
         """
@@ -953,11 +956,11 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     # Set color_palette
     sns.set_palette(color_palette)
     null_weights = _get_null_weights(has_null, df_list)
-    
+
     df_list = [df.dropna() for df in df_list]
     weights = [df.weights for df in df_list]
     bin_locs = [df.bin_loc for df in df_list]
-    
+
     data_type = _get_data_type(bin_locs)
 
     # Plot histograms and retrieve bins
@@ -975,7 +978,8 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
         if data_type == 'numeric':
             _plot_null_xticks(null_at, bin_info, xticks)
         elif data_type == 'timestamp':
-            pass 
+            pass
+
     # Set the x axis limits
     plt.xlim(_get_xlim(null_at, has_null, bin_info, null_bin_left, null_bin_width))
 
@@ -1031,7 +1035,7 @@ def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('deep')[0],
     ----------
     scatter_df : DataFrame
         DataFrame with three columns: scat_bin_x, scat_bin_y, and freq.
-        The columns scat_bin_x and scat_bin_y are the bins along the 
+        The columns scat_bin_x and scat_bin_y are the bins along the
         x and y axes and freq is how many values fall into the bin.
     s : int, default 20
         The size of each point
@@ -1066,7 +1070,7 @@ def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('deep')[0],
             colour[:, :3] = c
             # Add alpha component
             colour[:, 3] = scatter_df.freq/scatter_df.freq.max()
-            lw = 0 
+            lw = 0
         else:
             colour = c
             lw = 0.5
@@ -1080,7 +1084,7 @@ def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('deep')[0],
 
         x = scatter_df['scat_bin_x'].values.reshape(num_x, num_y)
         y = scatter_df['scat_bin_y'].values.reshape(num_x, num_y)
-        z = scatter_df['freq'].values.reshape(num_x, num_y) 
+        z = scatter_df['freq'].values.reshape(num_x, num_y)
 
         plt.pcolor(x, y, z, cmap=cmap)
         plt.xlim(x.min(), x.max())
