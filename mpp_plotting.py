@@ -588,6 +588,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         for col in df.columns[1:]:
             df[col] = df[col].fillna(0)
         return df
+
     def _get_bin_order(loc, hist_df, order_by):
         """Sorts hist_df by the specified order."""
         if order_by == 'alphabetical':
