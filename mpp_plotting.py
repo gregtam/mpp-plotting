@@ -19,6 +19,7 @@ from sqlalchemy import alias, between, case, cast, column, distinct, extract,\
                        false, func, intersect, literal, literal_column,\
                        select, text, true, union, union_all
 from sqlalchemy import CHAR, REAL, VARCHAR
+from sqlalchemy.sql.selectable import Alias, Select
 
 
 
@@ -26,6 +27,54 @@ def _add_weights_column(df_list, normed):
     """Add the weights column for each DataFrame in df_list."""
     for df in df_list:
         df['weights'] = _create_weight_percentage(df[['freq']], normed)
+
+
+def _convert_table_to_df(data):
+    """Converts a SQLAlchemy Alias, Select, or Table to a pandas
+    DataFrame. This function will use fetchall(), then convert that
+    result to a DataFrame. That way, we do not have to use a psql and
+    an extra, unneeded engine object.
+
+    Note that because Alias and Table objects cannot be executed, they
+    will not retain the same ordering as Select objects.
+
+    Parameters
+    ----------
+    data : SQLAlchemy Alias/Table
+        The object we will convert to a DataFrame.
+
+    Returns
+    -------
+    df : DataFrame
+         A DataFrame representation of the data.
+    """
+
+    def _get_slct_object(data):
+        """Returns a Selectable object."""
+        if isinstance(data, (Alias, Table)):
+            # Alias and Table cannot be executed, so we must select it
+            return select(data.c)
+        elif isinstance(data, Select):
+            # An Alias can be executed, so just return itself back. Note
+            # that if we selected the Alias, it would lose any of the
+            # ordering that mmight be specified
+            return data
+
+    def _get_column_names(data):
+        """Returns a list of the table's column names."""
+        return [s.name for s in data.c]
+
+
+    # Set the select object
+    slct = _get_slct_object(data)
+
+    # Fetch all rows (as a list of tuples, where each tuple value
+    # represents the columns)
+    tpl_list = slct.execute().fetchall()
+    col_names = _get_column_names(data)
+    df = pd.DataFrame(tpl_list, columns=col_names)
+
+    return df
 
 
 def _create_weight_percentage(hist_col, normed=False):
@@ -248,8 +297,7 @@ def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
     return auc_val
 
 
-def get_roc_curve(data, y_true, y_score, engine, schema=None,
-                  print_query=False):
+def get_roc_curve(data, y_true, y_score, schema=None, print_query=False):
     """Computes the ROC curve in database.
 
     Parameters
@@ -261,7 +309,6 @@ def get_roc_curve(data, y_true, y_score, engine, schema=None,
     y_score: str
         Name of the column that contains the scores from the machine
         learning algorithm
-    engine : SQLAlchemy engine object
     schema : str, default None
         The name of the schema where data is found
     print_query : boolean, default False
@@ -272,55 +319,55 @@ def get_roc_curve(data, y_true, y_score, engine, schema=None,
     roc_df : DataFrame
     """
 
-    if schema is not None and not isinstance(data, str):
-        raise ValueError('schema cannot be specified unless data is of string '
-                         'type.')
-    if isinstance(data, str):
-        metadata = MetaData(engine)
-        data = Table(data, metadata, autoload=True, schema=schema)
+    def _fetch_tot_pos_neg(data, y_true_col):
+        """Fetches the total number of positive and negative classes."""
+        tot_pos, tot_neg =\
+            select([func.sum(y_true_col).label('tot_pos'),
+                    func.sum(1 - y_true_col).label('tot_neg')
+                   ],
+                   from_obj=data
+                  )\
+            .execute()\
+            .fetchone()
+
+        return tot_pos, tot_neg
+
+    def _fetch_threshold_pos_neg_counts(data, y_true_col, y_score_col):
+        """Fetches number of positive and negatives at each threshold."""
+        threshold_count_slct =\
+            select([y_score_col
+                        .label('thresholds'),
+                    func.sum(y_true_col)
+                        .label('num_pos_at_threshold'),
+                    func.sum(1 - y_true_col)
+                        .label('num_neg_at_threshold')
+                   ],
+                   from_obj=data
+                  )\
+            .group_by(y_score_col)\
+            .order_by(y_score_col.desc())
+
+        threshold_count_df = _convert_table_to_df(threshold_count_slct)
+        return threshold_count_df
+
 
     y_true_col = column(y_true)
     y_score_col = column(y_score)
 
     # Get the sizes of the positive and negative classes
-    tot_pos, tot_neg =\
-        select([func.sum(y_true_col).label('tot_pos'),
-                func.sum(1 - y_true_col).label('tot_neg')
-               ],
-               from_obj=data
-              )\
-        .execute()\
-        .fetchone()
+    tot_pos, tot_neg = _fetch_tot_pos_neg(data, y_true_col)
 
-    # Calculate number of positives and negatives past a given threshold
-    pre_roc_alias =\
-        select([y_score_col,
-                func.sum(y_true_col)
-                    .over(order_by=y_score_col.desc())
-                    .label('num_pos'),
-                func.sum(1 - y_true_col)
-                    .over(order_by=y_score_col.desc())
-                    .label('num_neg')
-               ],
-               from_obj=data
-              )\
-        .alias('pre_roc')
+    # Calculate number of positives and negatives at each threshold
+    roc_df = _fetch_threshold_pos_neg_counts(data, y_true_col, y_score_col)
 
-    # Compute ROC curve values
-    roc_slct =\
-        select([distinct(y_score_col).label('thresholds'),
-                (column('num_pos')/tot_pos)
-                    .label('tpr'),
-                (column('num_neg')/tot_neg)
-                    .label('fpr'),
-                column('num_pos'),
-                column('num_neg')
-               ],
-               from_obj=pre_roc_alias
-              )\
-        .order_by('tpr', 'fpr')
+    # Add number of positive and negatives captured by each threshold
+    roc_df['num_pos'] = roc_df.num_pos_at_threshold.cumsum()
+    roc_df['num_neg'] = roc_df.num_neg_at_threshold.cumsum()
 
-    roc_df = psql.read_sql(roc_slct, engine)
+    # Compute the tpr and fpr
+    roc_df['tpr'] = roc_df.num_pos/tot_pos
+    roc_df['fpr'] = roc_df.num_neg/tot_neg
+
     return roc_df
 
 
