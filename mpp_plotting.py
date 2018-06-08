@@ -153,7 +153,7 @@ def _get_bin_locs_time(nbins, col_val, min_val, max_val):
 
 def _get_min_max_alias(from_obj, column_name, alias_name, min_val_name,
                        max_val_name):
-    """Returns a SQLAlchemy alias that captures the min and max values
+    """Returns a SQLAlchemy Alias that captures the min and max values
     of a column.
     """
 
@@ -321,6 +321,25 @@ def get_precision_recall_curve(data, y_true, y_score):
 
         return tot_pos
 
+    def _add_final_row(prec_rec_df):
+        """Adds a final row to represent precision = 1 and recall = 0."""
+        # Final threshold is one more than the largest threshold value
+        final_threshold = prec_rec_df.thresholds.iloc[0] + 1
+
+        # Set everything to 0 except for thresholds
+        final_row = [[final_threshold]
+                     + [0]*(prec_rec_df.shape[1] - 3)
+                     + [1, 0]  # precision = 1 and recall = 0
+                    ]
+
+        # Final row to append
+        new_df = pd.DataFrame(final_row, columns=prec_rec_df.columns)
+
+        prec_rec_df = pd.concat([new_df, prec_rec_df],
+                                ignore_index=True
+                               )
+        return prec_rec_df
+
 
     y_true_col = column(y_true)
     y_score_col = column(y_score)
@@ -335,6 +354,9 @@ def get_precision_recall_curve(data, y_true, y_score):
     prec_rec_df['precision'] =\
         prec_rec_df.num_tp/(prec_rec_df.num_tp + prec_rec_df.num_fp)
     prec_rec_df['recall'] = prec_rec_df.num_tp/tot_pos
+
+    # Add row for (0, 1)
+    prec_rec_df = _add_final_row(prec_rec_df)
 
     return prec_rec_df
 
@@ -399,6 +421,22 @@ def get_roc_curve(data, y_true, y_score):
 
         return tot_pos, tot_neg
 
+    def _add_final_row(roc_df):
+        """Adds a final row to represent tpr = fpr = 0."""
+        # Final threshold is one more than the largest threshold value
+        final_threshold = roc_df.thresholds.iloc[0] + 1
+
+        # Set everything to 0 except for thresholds
+        final_row = [[final_threshold] + [0]*(roc_df.shape[1] - 1)]
+
+        # Final row to append
+        new_df = pd.DataFrame(final_row, columns=roc_df.columns)
+
+        roc_df = pd.concat([new_df, roc_df],
+                           ignore_index=True
+                          )
+        return roc_df
+
 
     y_true_col = column(y_true)
     y_score_col = column(y_score)
@@ -412,6 +450,9 @@ def get_roc_curve(data, y_true, y_score):
     # Compute the tpr and fpr
     roc_df['tpr'] = roc_df.num_tp/tot_pos
     roc_df['fpr'] = roc_df.num_fp/tot_neg
+
+    # Add row for (0, 0)
+    roc_df = _add_final_row(roc_df)
 
     return roc_df
 
