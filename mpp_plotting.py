@@ -85,6 +85,30 @@ def _create_weight_percentage(hist_col, normed=False):
         return hist_col
 
 
+def _fetch_thresh_pos_neg_counts(data, y_true_col, y_score_col):
+    """Fetches number of positive and negatives at each threshold."""
+    thresh_count_slct =\
+        select([y_score_col
+                    .label('thresholds'),
+                func.sum(y_true_col)
+                    .label('num_pos_at_threshold'),
+                func.sum(1 - y_true_col)
+                    .label('num_neg_at_threshold')
+               ],
+               from_obj=data
+              )\
+        .group_by(y_score_col)\
+        .order_by(y_score_col.desc())
+
+    thresh_count_df = _convert_table_to_df(thresh_count_slct)
+
+    # Add number of true and false positives captured by each threshold
+    thresh_count_df['num_tp'] = thresh_count_df.num_pos_at_threshold.cumsum()
+    thresh_count_df['num_fp'] = thresh_count_df.num_neg_at_threshold.cumsum()
+
+    return thresh_count_df
+
+
 def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
     """Gets the bin locations for a numeric type."""
     # Which bin it should fall into
@@ -268,6 +292,53 @@ def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
     return psql.read_sql(binned_slct, engine)
 
 
+def get_precision_recall_curve(data, y_true, y_score):
+    """Computes the precision recall curve in database.
+
+    Parameters
+    ----------
+    data : str or SQLAlchemy selectable
+        The table we wish to compute a histogram with
+    y_true : str
+        Name of the column that contains the true values
+    y_score: str
+        Name of the column that contains the scores from the machine
+        learning algorithm
+
+    Returns
+    -------
+    prec_roc_df : DataFrame
+    """
+
+    def _fetch_tot_pos(data, y_true_col):
+        """Fetches the total number of positive and negative classes."""
+        tot_pos =\
+            select([func.sum(y_true_col).label('tot_pos')],
+                   from_obj=data
+                  )\
+            .execute()\
+            .fetchone()
+
+        return tot_pos
+
+
+    y_true_col = column(y_true)
+    y_score_col = column(y_score)
+
+    # Get the number of predicted positive and negative classes
+    tot_pos = _fetch_tot_pos(data, y_true_col)
+
+    # Calculate number of positives and negatives at each threshold
+    prec_rec_df = _fetch_thresh_pos_neg_counts(data, y_true_col, y_score_col)
+
+    # Compute precision and recall
+    prec_rec_df['precision'] =\
+        prec_rec_df.num_tp/(prec_rec_df.num_tp + prec_rec_df.num_fp)
+    prec_rec_df['recall'] = prec_rec_df.num_tp/tot_pos
+
+    return prec_rec_df
+
+
 def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
     """Given an ROC DataFrame such as the one created in get_roc_curve,
     return the AUC. This is achieved by taking the ROC curve and
@@ -297,7 +368,7 @@ def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
     return auc_val
 
 
-def get_roc_curve(data, y_true, y_score, schema=None, print_query=False):
+def get_roc_curve(data, y_true, y_score):
     """Computes the ROC curve in database.
 
     Parameters
@@ -309,10 +380,6 @@ def get_roc_curve(data, y_true, y_score, schema=None, print_query=False):
     y_score: str
         Name of the column that contains the scores from the machine
         learning algorithm
-    schema : str, default None
-        The name of the schema where data is found
-    print_query : boolean, default False
-        If True, print the resulting query
 
     Returns
     -------
@@ -332,24 +399,6 @@ def get_roc_curve(data, y_true, y_score, schema=None, print_query=False):
 
         return tot_pos, tot_neg
 
-    def _fetch_threshold_pos_neg_counts(data, y_true_col, y_score_col):
-        """Fetches number of positive and negatives at each threshold."""
-        threshold_count_slct =\
-            select([y_score_col
-                        .label('thresholds'),
-                    func.sum(y_true_col)
-                        .label('num_pos_at_threshold'),
-                    func.sum(1 - y_true_col)
-                        .label('num_neg_at_threshold')
-                   ],
-                   from_obj=data
-                  )\
-            .group_by(y_score_col)\
-            .order_by(y_score_col.desc())
-
-        threshold_count_df = _convert_table_to_df(threshold_count_slct)
-        return threshold_count_df
-
 
     y_true_col = column(y_true)
     y_score_col = column(y_score)
@@ -358,15 +407,11 @@ def get_roc_curve(data, y_true, y_score, schema=None, print_query=False):
     tot_pos, tot_neg = _fetch_tot_pos_neg(data, y_true_col)
 
     # Calculate number of positives and negatives at each threshold
-    roc_df = _fetch_threshold_pos_neg_counts(data, y_true_col, y_score_col)
-
-    # Add number of positive and negatives captured by each threshold
-    roc_df['num_pos'] = roc_df.num_pos_at_threshold.cumsum()
-    roc_df['num_neg'] = roc_df.num_neg_at_threshold.cumsum()
+    roc_df = _fetch_thresh_pos_neg_counts(data, y_true_col, y_score_col)
 
     # Compute the tpr and fpr
-    roc_df['tpr'] = roc_df.num_pos/tot_pos
-    roc_df['fpr'] = roc_df.num_neg/tot_neg
+    roc_df['tpr'] = roc_df.num_tp/tot_pos
+    roc_df['fpr'] = roc_df.num_fp/tot_neg
 
     return roc_df
 
