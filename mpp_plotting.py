@@ -13,7 +13,7 @@ import pandas.io.sql as psql
 import psycopg2
 import seaborn as sns
 import sqlalchemy
-from sqlalchemy import create_engine, Column, MetaData, Table
+from sqlalchemy import Column, MetaData, Table
 from sqlalchemy import all_, and_, any_, not_, or_
 from sqlalchemy import alias, between, case, cast, column, distinct, extract,\
                        false, func, intersect, literal, literal_column,\
