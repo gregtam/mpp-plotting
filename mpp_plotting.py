@@ -287,7 +287,7 @@ def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
             .order_by('bin_loc')
 
     if print_query:
-        print binned_slct
+        print(binned_slct)
 
     return psql.read_sql(binned_slct, engine)
 
@@ -565,7 +565,7 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
             .order_by(column_name_x, column_name_y)
 
         if print_query:
-            print binned_table
+            print(binned_table)
 
         return psql.read_sql(binned_table, engine)
 
@@ -652,7 +652,7 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
                   )
 
         if print_query:
-            print scatterplot_tbl
+            print(scatterplot_tbl)
 
         scatterplot_df = psql.read_sql(scatterplot_tbl, engine)
         return scatterplot_df
@@ -702,7 +702,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         Returns the joined DataFrame
         """
 
-        for i in xrange(len(df_list)):
+        for i in range(len(df_list)):
             temp_df = df_list[i].copy()
             temp_df.columns = ['category', 'freq_{}'.format(i)]
 
@@ -892,7 +892,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         max_y_tick = int(np.ceil(np.max(bin_height))) + 1
         yticks = [10**i for i in range(max_y_tick)]
         yticks = ['1e{}'.format(i) for i in range(max_y_tick)]
-        plt.yticks(range(max_y_tick), yticks)
+        plt.yticks(list(range(max_y_tick)), yticks)
 
 
     df_list, labels = _listify(df_list, labels)
@@ -1156,8 +1156,8 @@ def plot_date_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     sns.set_palette(color_palette)
     null_weights = _get_null_weights(has_null, df_list)
 
-    print has_null
-    print null_weights
+    print(has_null)
+    print(null_weights)
 
 
 def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('deep')[0],
