@@ -197,8 +197,10 @@ def _listify(df_list, labels):
 
 
 
-def get_histogram_values(data, column_name, schema=None, nbins=25,
-                         bin_width=None, cast_as=None, print_query=False):
+def compute_histogram_values(
+        data, column_name, schema=None, nbins=25, bin_width=None, cast_as=None,
+        print_query=False
+    ):
     """Takes a SQL table and creates histogram bin heights. Relevant
     parameters are either the number of bins or the width of each bin.
     Only one of these is specified. The other one must be left at its
@@ -285,7 +287,7 @@ def get_histogram_values(data, column_name, schema=None, nbins=25,
     return _convert_table_to_df(binned_slct)
 
 
-def get_precision_recall_curve(data, y_true, y_score):
+def compute_precision_recall_curve(data, y_true, y_score):
     """Computes the precision recall curve in database.
 
     Parameters
@@ -354,11 +356,11 @@ def get_precision_recall_curve(data, y_true, y_score):
     return prec_rec_df
 
 
-def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
-    """Given an ROC DataFrame such as the one created in get_roc_curve,
-    return the AUC. This is achieved by taking the ROC curve and
-    interpolating every single point with a straight line and computing
-    the sum of the areas of all the trapezoids.
+def compute_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
+    """Given an ROC DataFrame such as the one created in
+    compute_roc_curve, return the AUC. This is achieved by taking the
+    ROC curve and interpolating every single point with a straight line
+    and computing the sum of the areas of all the trapezoids.
 
     Parameters
     ----------
@@ -383,7 +385,7 @@ def get_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
     return auc_val
 
 
-def get_roc_curve(data, y_true, y_score):
+def compute_roc_curve(data, y_true, y_score):
     """Computes the ROC curve in database.
 
     Parameters
@@ -450,11 +452,12 @@ def get_roc_curve(data, y_true, y_score):
     return roc_df
 
 
-def get_scatterplot_values(data, column_name_x, column_name_y,
-                           schema=None, nbins=(50, 50), bin_size=None,
-                           cast_x_as=None, cast_y_as=None, print_query=False):
+def compute_scatterplot_values(
+        data, column_name_x, column_name_y, schema=None, nbins=(50, 50),
+        bin_size=None, cast_x_as=None, cast_y_as=None, print_query=False
+    ):
     """Takes a SQL table and creates scatter plot bin values. This is
-    the 2D version of get_histogram_values. Relevant parameters are
+    the 2D version of compute_histogram_values. Relevant parameters are
     either the number of bins or the size of each bin in both the x and
     y direction. Only number of bins or size of the bins is specified.
     The other pair must be left at its default value of 0 or it will
@@ -991,7 +994,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
         """Plots the histogram for non-null values with corresponding
         labels if provided. This function will take also reduce the
         number of bins in the histogram. This is useful if we want to
-        apply get_histogram_values for a large number of bins, then
+        apply compute_histogram_values for a large number of bins, then
         experiment with plotting different bin amounts using the
         histogram values.
         """
