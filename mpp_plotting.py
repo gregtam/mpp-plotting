@@ -197,7 +197,7 @@ def _listify(df_list, labels):
 
 
 
-def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
+def get_histogram_values(data, column_name, schema=None, nbins=25,
                          bin_width=None, cast_as=None, print_query=False):
     """Takes a SQL table and creates histogram bin heights. Relevant
     parameters are either the number of bins or the width of each bin.
@@ -210,7 +210,6 @@ def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
         The table we wish to compute a histogram with
     column_name : str
         Name of the column of interest
-    engine : SQLAlchemy engine object
     schema : str, default None
         The name of the schema where data is found
     nbins : int, default 25
@@ -233,12 +232,6 @@ def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
         if bin_width is not None and bin_width < 0:
             raise Exception('bin_width must be positive.')
 
-    if schema is not None and not isinstance(data, str):
-        raise ValueError('schema cannot be specified unless data is of string '
-                         'type.')
-    if isinstance(data, str):
-        metadata = MetaData(engine)
-        data = Table(data, metadata, autoload=True, schema=schema)
 
     _check_for_input_errors(nbins, bin_width)
     is_category = _is_category_column(data, column_name)
@@ -289,7 +282,7 @@ def get_histogram_values(data, column_name, engine, schema=None, nbins=25,
     if print_query:
         print(binned_slct)
 
-    return psql.read_sql(binned_slct, engine)
+    return _convert_table_to_df(binned_slct)
 
 
 def get_precision_recall_curve(data, y_true, y_score):
@@ -457,7 +450,7 @@ def get_roc_curve(data, y_true, y_score):
     return roc_df
 
 
-def get_scatterplot_values(data, column_name_x, column_name_y, engine,
+def get_scatterplot_values(data, column_name_x, column_name_y,
                            schema=None, nbins=(50, 50), bin_size=None,
                            cast_x_as=None, cast_y_as=None, print_query=False):
     """Takes a SQL table and creates scatter plot bin values. This is
@@ -475,7 +468,6 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
         Name of one column of interest to be plotted
     column_name_t : str
         Name of another column of interest to be plotted
-    engine : SQLAlchemy engine object, default None
     schema : str, default None
         The name of the schema where data is found
     nbins : tuple, default (50, 50)
@@ -543,10 +535,6 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
         return scat_bin_tbl
 
 
-    if isinstance(data, str):
-        metadata = MetaData(engine)
-        data = Table(data, metadata, autoload=True, schema=schema)
-
     _check_for_input_errors(nbins, bin_size)
     is_category_x = _is_category_column(data, column_name_x)
     is_category_y = _is_category_column(data, column_name_y)
@@ -567,7 +555,7 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
         if print_query:
             print(binned_table)
 
-        return psql.read_sql(binned_table, engine)
+        return _convert_table_to_df(binned_table)
 
     elif not is_category_x and not is_category_y:
         min_val_x = column('min_val_x')
@@ -654,7 +642,7 @@ def get_scatterplot_values(data, column_name_x, column_name_y, engine,
         if print_query:
             print(scatterplot_tbl)
 
-        scatterplot_df = psql.read_sql(scatterplot_tbl, engine)
+        scatterplot_df = _convert_table_to_df(scatterplot_tbl)
         return scatterplot_df
 
 
