@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pandas.io.sql as psql
-import psycopg2
 import seaborn as sns
 import sqlalchemy
 from sqlalchemy import Column, MetaData, Table
@@ -651,7 +650,7 @@ def compute_scatterplot_values(
 
 def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
                            null_at='left', order_by=0, ascending=True,
-                           color_palette=sns.color_palette('deep')):
+                           color_palette=sns.color_palette('colorblind')):
     """Plots categorical histograms.
 
     Parameters
@@ -932,7 +931,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
 
 def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
                        null_at='left',
-                       color_palette=sns.color_palette('deep')):
+                       color_palette=sns.color_palette('colorblind')):
     """Plots numerical histograms together.
 
     Parameters
@@ -1151,7 +1150,7 @@ def plot_date_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     print(null_weights)
 
 
-def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('deep')[0],
+def plot_scatterplot(scatter_df, s=20, c=sns.color_palette('colorblind')[0],
                      plot_type='scatter', by_size=True, by_opacity=True,
                      marker='o', cmap='Blues'):
     """Plots a scatter plot based on the computed scatter plot bins.
