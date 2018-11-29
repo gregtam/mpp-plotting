@@ -301,7 +301,7 @@ def compute_precision_recall_curve(data, y_true, y_score):
 
     Returns
     -------
-    prec_roc_df : DataFrame
+    prec_rec_df : DataFrame
     """
 
     def _fetch_tot_pos(data, y_true_col):
