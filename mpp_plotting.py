@@ -355,35 +355,6 @@ def compute_precision_recall_curve(data, y_true, y_score):
     return prec_rec_df
 
 
-def compute_roc_auc_score(roc_df, tpr_column='tpr', fpr_column='fpr'):
-    """Given an ROC DataFrame such as the one created in
-    compute_roc_curve, return the AUC. This is achieved by taking the
-    ROC curve and interpolating every single point with a straight line
-    and computing the sum of the areas of all the trapezoids.
-
-    Parameters
-    ----------
-    roc_df : DataFrame
-        Contains the columns for true positive and false positive rates
-    tpr_column : str, default 'tpr'
-        Name of the true positive rate column
-    fpr_column : str, default 'fpr'
-        Name of the false positive rate column
-
-    Returns
-    -------
-    auc_val : float
-    """
-
-    # The average of the two consecutive tprs
-    avg_height = roc_df[tpr_column].rolling(2).mean()[1:]
-    # The width (i.e., distance between two consecutive fprs)
-    width = roc_df[fpr_column].diff()[1:]
-
-    auc_val = sum(avg_height * width)
-    return auc_val
-
-
 def compute_roc_curve(data, y_true, y_score):
     """Computes the ROC curve in database.
 
