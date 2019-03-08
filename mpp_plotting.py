@@ -170,8 +170,19 @@ def _get_min_max_alias(from_obj, column_name, alias_name, min_val_name,
 def _is_category_column(from_obj, column_name):
     """Returns whether the column is a category."""
     data_type = from_obj.c[column_name].type.__visit_name__
-    numeric_types = ['BIGINT', 'DOUBLE', 'INT', 'FLOAT', 'REAL', 'SMALLINT',
-                     'TIMESTAMP', 'TINYINT']
+
+    # Names of numeric type visit names in Impyla
+    impyla_numeric_types = {'BIGINT', 'DOUBLE', 'INT', 'FLOAT', 'REAL',
+                            'SMALLINT', 'TIMESTAMP', 'TINYINT'}
+
+    # Names of numeric type visit names in SQLAlchemy
+    sqlalchemy_numeric_types = {'big_integer', 'INTEGER', 'integer', 'float',
+                                'small_integer', 'DATE', 'date', 'DATETIME',
+                                'datetime', 'NUMERIC', 'numeric'}
+
+    # Combine numeric types together
+    numeric_types = {*impyla_numeric_types, *sqlalchemy_numeric_types}
+
     return data_type not in numeric_types
 
 
@@ -1117,6 +1128,7 @@ def plot_date_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     sns.set_palette(color_palette)
     null_weights = _get_null_weights(has_null, df_list)
 
+    # TODO: Finish this
     print(has_null)
     print(null_weights)
 
