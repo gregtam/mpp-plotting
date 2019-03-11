@@ -108,42 +108,42 @@ def _fetch_thresh_pos_neg_counts(data, y_true_col, y_score_col):
     return thresh_count_df
 
 
-def _get_bin_locs_numeric(nbins, col_val, min_val, max_val):
+def _get_bin_locs_numeric(n_bins, col_val, min_val, max_val):
     """Gets the bin locations for a numeric type."""
     # Which bin it should fall into
     numer = (col_val - min_val).cast(DOUBLE)
     denom = (max_val - min_val).cast(DOUBLE)
-    bin_nbr = func.floor(numer/denom * nbins)
+    bin_nbr = func.floor(numer/denom * n_bins)
 
     # Group max value into the last bin. It would otherwise be in a
     # separate bin on its own.
-    bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
+    bin_nbr_correct = case([(bin_nbr < n_bins, bin_nbr)],
                            else_=bin_nbr - 1
                           )
 
     # Scale the bins to their proper size
-    bin_nbr_scaled = bin_nbr_correct/nbins * denom
+    bin_nbr_scaled = bin_nbr_correct/n_bins * denom
     # Translate bins to their proper locations
     bin_loc = bin_nbr_scaled + min_val
 
     return bin_loc
 
 
-def _get_bin_locs_time(nbins, col_val, min_val, max_val):
+def _get_bin_locs_time(n_bins, col_val, min_val, max_val):
     """Gets the bin locations for a time type."""
     # Get the SQL expressions for the time ranges
     numer = func.extract('EPOCH', col_val - max_val).cast(DOUBLE)
     denom = func.extract('EPOCH', min_val - max_val).cast(DOUBLE)
 
     # Which bin it should fall into
-    bin_nbr = func.floor(numer/denom * nbins)
+    bin_nbr = func.floor(numer/denom * n_bins)
     # Group max value into the last bin. It would otherwise be in a
     # separate bin on its own
-    bin_nbr_correct = case([(bin_nbr < nbins, bin_nbr)],
+    bin_nbr_correct = case([(bin_nbr < n_bins, bin_nbr)],
                            else_=bin_nbr - 1
                           )
     # Scale the bins to their proper size
-    bin_nbr_scaled = bin_nbr_correct/nbins * denom
+    bin_nbr_scaled = bin_nbr_correct/n_bins * denom
     # Translate bins to their proper locations
     bin_loc = bin_nbr_scaled * text("INTERVAL '1 second'") + min_val
 
@@ -208,7 +208,7 @@ def _listify(df_list, labels):
 
 
 def compute_histogram_values(
-        data, column_name, schema=None, nbins=25, bin_width=None, cast_as=None,
+        data, column_name, schema=None, n_bins=25, bin_width=None, cast_as=None,
         print_query=False
     ):
     """Takes a SQL table and creates histogram bin heights. Relevant
@@ -224,35 +224,37 @@ def compute_histogram_values(
         Name of the column of interest
     schema : str, default None
         The name of the schema where data is found
-    nbins : int, default 25
+    n_bins : int, default 25
         Number of desired bins
     bin_width : int, default None
-        Width of each bin. If None, then use nbins to define bin width.
+        Width of each bin. If None, then use n_bins to define bin width.
     cast_as : SQLAlchemy data type, default None
         SQL type to cast as
     print_query : boolean, default False
         If True, print the resulting query
     """
 
-    def _check_for_input_errors(nbins, bin_width):
+    def _check_for_input_errors(n_bins, bin_width):
         """Check to see if any inputs conflict and raise an error if
         there are issues.
         """
 
-        if nbins is not None and nbins < 0:
-            raise Exception('nbins must be positive.')
+        if n_bins is not None and n_bins < 0:
+            raise Exception('n_bins must be positive.')
         if bin_width is not None and bin_width < 0:
             raise Exception('bin_width must be positive.')
+        if n_bins is not None and bin_width is not None:
+            raise Exception('n_bins and bin_width cannot both be specified.')
 
 
-    _check_for_input_errors(nbins, bin_width)
+    _check_for_input_errors(n_bins, bin_width)
     is_category = _is_category_column(data, column_name)
     is_time_type = _is_time_type(data, column_name)
 
     if is_category:
         binned_slct =\
             select([column(column_name).label('category'),
-                    func.count('*').label('freq')
+                    func.count().label('freq')
                    ],
                    from_obj=data
                   )\
@@ -264,7 +266,7 @@ def compute_histogram_values(
         max_val = column('max_val')
         col_val = column(column_name)
 
-        # Table to get min and max value
+        # Create an Alias to compute the min and max value
         min_max_alias = _get_min_max_alias(data,
                                            column_name,
                                            'min_max_table',
@@ -273,18 +275,18 @@ def compute_histogram_values(
                                           )
 
         if bin_width is not None:
-            # If bin width is not specified, calculate nbins from it.
-            nbins = (max_val - min_val)/bin_width
+            # If bin width is not specified, calculate n_bins from it.
+            n_bins = (max_val - min_val)/bin_width
 
         if is_time_type:
-            bin_loc = _get_bin_locs_time(nbins, col_val, min_val, max_val)
+            bin_loc = _get_bin_locs_time(n_bins, col_val, min_val, max_val)
         else:
-            bin_loc = _get_bin_locs_numeric(nbins, col_val, min_val, max_val)
+            bin_loc = _get_bin_locs_numeric(n_bins, col_val, min_val, max_val)
 
         # Group by the bin locations
         binned_slct =\
             select([bin_loc.label('bin_loc'),
-                    func.count('*').label('freq')
+                    func.count().label('freq')
                    ],
                    from_obj=[data, min_max_alias]
                   )\
@@ -434,7 +436,7 @@ def compute_roc_curve(data, y_true, y_score):
 
 
 def compute_scatterplot_values(
-        data, column_name_x, column_name_y, schema=None, nbins=(50, 50),
+        data, column_name_x, column_name_y, schema=None, n_bins=(50, 50),
         bin_size=None, cast_x_as=None, cast_y_as=None, print_query=False
     ):
     """Takes a SQL table and creates scatter plot bin values. This is
@@ -454,7 +456,7 @@ def compute_scatterplot_values(
         Name of another column of interest to be plotted
     schema : str, default None
         The name of the schema where data is found
-    nbins : tuple, default (50, 50)
+    n_bins : tuple, default (50, 50)
         Number of desird bins for x and y directions
     bin_size : tuple, default None
         The size of of the bins for the x and y directions
@@ -466,7 +468,7 @@ def compute_scatterplot_values(
     scatterplot_df : DataFrame
     """
 
-    def _check_for_input_errors(nbins, bin_size):
+    def _check_for_input_errors(n_bins, bin_size):
         """Check to see if any inputs conflict and raise an error if
         there are issues.
         """
@@ -478,12 +480,12 @@ def compute_scatterplot_values(
         if bin_size is not None:
             if bin_size[0] < 0 or bin_size[1] < 0:
                 raise Exception('Bin dimensions must both be positive.')
-        elif nbins is not None:
-            if nbins[0] < 0 or nbins[1] < 0:
+        elif n_bins is not None:
+            if n_bins[0] < 0 or n_bins[1] < 0:
                 raise Exception('Number of bin dimensions must both be '
                                 'positive.')
 
-    def _get_bin_loc_tbl(min_max_tbl, nbins, bin_name, min_val, max_val):
+    def _get_bin_loc_tbl(min_max_tbl, n_bins, bin_name, min_val, max_val):
         """Gets all bin locations for a numeric type, including for bins
         that do not contain any data. This is used for scatter plot
         heatmaps where we will need to fill it in. Regular scatter plots
@@ -491,11 +493,11 @@ def compute_scatterplot_values(
         """
 
         bin_range = max_val - min_val
-        bin_loc = column('bin_nbr').cast(DOUBLE)/nbins * bin_range + min_val
+        bin_loc = column('bin_nbr').cast(DOUBLE)/n_bins * bin_range + min_val
 
         bin_loc_tbl =\
             select([bin_loc.cast(DOUBLE).label(bin_name)],
-                   from_obj=[func.generate_series(1, nbins).alias('bin_nbr'),
+                   from_obj=[func.generate_series(1, n_bins).alias('bin_nbr'),
                              min_max_tbl
                             ]
                   )
@@ -519,7 +521,7 @@ def compute_scatterplot_values(
         return scat_bin_tbl
 
 
-    _check_for_input_errors(nbins, bin_size)
+    _check_for_input_errors(n_bins, bin_size)
     is_category_x = _is_category_column(data, column_name_x)
     is_category_y = _is_category_column(data, column_name_y)
     is_time_type_x = _is_time_type(data, column_name_x)
@@ -564,23 +566,23 @@ def compute_scatterplot_values(
                                           )
 
         if bin_size is not None:
-            # If bin size is not specified, calculated nbins_x and
-            # nbins_y from it.
-            nbins[0] = (max_val_x - min_val_x)/bin_size[0]
-            nbins[1] = (may_val_y - min_val_y)/bin_size[1]
+            # If bin size is not specified, calculated n_bins_x and
+            # n_bins_y from it.
+            n_bins[0] = (max_val_x - min_val_x)/bin_size[0]
+            n_bins[1] = (may_val_y - min_val_y)/bin_size[1]
 
         if is_time_type_x:
-            bin_loc_x = _get_bin_locs_time(nbins[0], col_val_x,
+            bin_loc_x = _get_bin_locs_time(n_bins[0], col_val_x,
                                            min_val_x, max_val_x)
         else:
-            bin_loc_x = _get_bin_locs_numeric(nbins[0], col_val_x,
+            bin_loc_x = _get_bin_locs_numeric(n_bins[0], col_val_x,
                                               min_val_x, max_val_x)
 
         if is_time_type_y:
-            bin_loc_y = _get_bin_locs_time(nbins[1], col_val_y,
+            bin_loc_y = _get_bin_locs_time(n_bins[1], col_val_y,
                                            min_val_y, max_val_y)
         else:
-            bin_loc_y = _get_bin_locs_numeric(nbins[1], col_val_y,
+            bin_loc_y = _get_bin_locs_numeric(n_bins[1], col_val_y,
                                               min_val_y, max_val_y)
 
         binned_table =\
@@ -593,13 +595,13 @@ def compute_scatterplot_values(
             .group_by('bin_loc_x', 'bin_loc_y')\
 
         bin_loc_tbl_x = _get_bin_loc_tbl(min_max_tbl_x,
-                                         nbins[0],
+                                         n_bins[0],
                                          'scat_bin_x',
                                          min_val_x,
                                          max_val_x
                                         )
         bin_loc_tbl_y = _get_bin_loc_tbl(min_max_tbl_y,
-                                         nbins[1],
+                                         n_bins[1],
                                          'scat_bin_y',
                                          min_val_y,
                                          max_val_y
@@ -911,7 +913,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
     return hist_df
 
 
-def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
+def plot_numeric_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
                        null_at='left',
                        color_palette=sns.color_palette('colorblind')):
     """Plots numerical histograms together.
@@ -925,7 +927,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     labels : str or list of str
         A string (for one histogram) or list of strings which sets the
         labels for the histograms
-    nbins : int, default 25
+    n_bins : int, default 25
         The desired number of bins
     log : bool, default False
         Whether to display y axis on log scale
@@ -984,9 +986,9 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
         if data_type == 'numeric':
             if len(labels) > 0:
                 _, bins, _ = plt.hist(x=bin_locs, weights=weights,
-                                      label=labels, bins=nbins, log=log)
+                                      label=labels, bins=n_bins, log=log)
             else:
-                _, bins, _ = plt.hist(x=bin_locs, weights=weights, bins=nbins,
+                _, bins, _ = plt.hist(x=bin_locs, weights=weights, bins=n_bins,
                                       log=log)
             return bins
 
@@ -997,7 +999,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
             # to convert them to datetime since these can be plotted.
             datetime_list = [dt.to_pydatetime() for dt in bin_locs[0]]
             _, bins, _ = plt.hist(x=datetime_list, weights=weights[0],
-                                  bins=nbins, log=log)
+                                  bins=n_bins, log=log)
             return bins
 
     def _get_null_bin_width(data_type, bin_info, num_hists, null_weights):
@@ -1070,7 +1072,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     data_type = _get_data_type(bin_locs)
 
     # Plot histograms and retrieve bins
-    bin_info = _plot_hist(data_type, bin_locs, weights, labels, nbins, log)
+    bin_info = _plot_hist(data_type, bin_locs, weights, labels, n_bins, log)
 
     null_bin_width = _get_null_bin_width(data_type, bin_info, num_hists, null_weights)
     null_bin_left = _get_null_bin_left(data_type, null_at, num_hists, bin_info, null_weights)
@@ -1090,7 +1092,7 @@ def plot_numeric_hists(df_list, labels=[], nbins=25, log=False, normed=False,
     plt.xlim(_get_xlim(null_at, has_null, bin_info, null_bin_left, null_bin_width))
 
 
-def plot_date_hists(df_list, labels=[], nbins=25, log=False, normed=False,
+def plot_date_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
                     null_at='left',
                     color_palette=sns.color_palette('colorblind')):
     """Plots histograms by date.
@@ -1102,7 +1104,7 @@ def plot_date_hists(df_list, labels=[], nbins=25, log=False, normed=False,
               bin.
     labels - A string (for one histogram) or list of strings which sets
              the labels for the histograms
-    nbins - The desired number of bins (Default: 25)
+    n_bins - The desired number of bins (Default: 25)
     log - Boolean of whether to display y axis on log scale
           (Default: False)
     normed - Boolean of whether to normalize histograms so that the
