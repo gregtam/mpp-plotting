@@ -672,7 +672,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         colours.
     """
 
-    def _join_freq_df(df_list):
+    def _join_freq_df():
         """Joins all the DataFrames so that we have a master table with
         category and the frequencies for each table.
 
@@ -697,23 +697,27 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         # Fill in nulls with 0 (except for category column)
         for col in df.columns[1:]:
             df[col] = df[col].fillna(0)
+
         return df
 
-    def _get_bin_order(loc, hist_df, order_by):
+    def _get_bin_order():
         """Sorts hist_df by the specified order."""
         if order_by == 'alphabetical':
             return hist_df\
                 .sort_values('category', ascending=ascending)\
                 .reset_index(drop=True)
+
         elif isinstance(order_by, int):
             # Desired column in the hist_df DataFrame
             weights_col = 'weights_{}'.format(order_by)
 
             if weights_col not in hist_df.columns:
                 raise Exception('order_by index not in hist_df.')
+
             return hist_df\
                 .sort_values(weights_col, ascending=ascending)\
                 .reset_index(drop=True)
+
         else:
             raise Exception('Invalid order_by')
 
@@ -873,11 +877,13 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
 
 
     df_list, labels = _listify(df_list, labels)
+
     # Joins in all the df_list DataFrames so that we can pick a certain
     # category and retrieve the count for each.
-    hist_df = _join_freq_df(df_list)
+    hist_df = _join_freq_df()
+
     # Order them based on specified order
-    hist_df = _get_bin_order(null_at, hist_df, order_by)
+    hist_df = _get_bin_order()
 
     num_hists = len(df_list)
     num_categories = _get_num_categories(hist_df)
@@ -916,6 +922,7 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
     return hist_df
 
 
+# TODO: Refactor code in here to make more legible
 def plot_numeric_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
                        null_at='left',
                        color_palette=sns.color_palette('colorblind')):
@@ -948,11 +955,11 @@ def plot_numeric_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
         colours.
     """
 
-    def _check_for_nulls(df_list):
+    def _check_for_nulls():
         """Returns a list of whether each list has a null column."""
         return [df.bin_loc.isnull().any() for df in df_list]
 
-    def _get_null_weights(has_null, df_list):
+    def _get_null_weights():
         """If there are nulls, determine the weights.  Otherwise, set
         weights to 0.
 
@@ -963,7 +970,7 @@ def plot_numeric_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
                 if is_null else 0
                 for is_null, df in zip(has_null, df_list)]
 
-    def _get_data_type(bin_locs):
+    def _get_data_type():
         """ Returns the data type in the histogram, i.e., whether it is
         numeric or a timetamp. This is important because it determines
         how we deal with the bins.
@@ -976,12 +983,12 @@ def plot_numeric_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
         else:
             raise Exception('Bin data type not valid: {}'.format(type(bin_locs[0][0])))
 
-    def _plot_hist(data_type, bin_locs, weights, labels, bins, log):
+    def _plot_hist():
         """Plots the histogram for non-null values with corresponding
         labels if provided. This function will take also reduce the
         number of bins in the histogram. This is useful if we want to
-        apply compute_histogram_values for a large number of bins, then
-        experiment with plotting different bin amounts using the
+        apply compute_histogram_values() for a large number of bins,
+        then experiment with plotting different bin amounts using the
         histogram values.
         """
 
@@ -1005,7 +1012,7 @@ def plot_numeric_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
                                   bins=n_bins, log=log)
             return bins
 
-    def _get_null_bin_width(data_type, bin_info, num_hists, null_weights):
+    def _get_null_bin_width():
         """Returns the width of each null bin."""
         bin_width = bin_info[1] - bin_info[0]
         if num_hists == 1:
@@ -1013,72 +1020,77 @@ def plot_numeric_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
         else:
             return 0.8 * bin_width/len(null_weights)
 
-    def _get_null_bin_left(data_type, loc, num_hists, bin_info, null_weights):
+    def _get_null_bin_left():
         """Gets the left index/indices or the null column(s)."""
         bin_width = bin_info[1] - bin_info[0]
-        if loc == 'left':
+        if null_at == 'left':
             if num_hists == 1:
                 return [bin_info[0] - bin_width]
             else:
-                return [bin_info[0] - bin_width + bin_width*0.1 + i*_get_null_bin_width(data_type, bin_info, num_hists, null_weights) for i in range(num_hists)]
-        elif loc == 'right':
+                return [bin_info[0] - bin_width + bin_width*0.1 + i*_get_null_bin_width() for i in range(num_hists)]
+
+        elif null_at == 'right':
             if num_hists == 1:
                 return [bin_info[-1]]
             else:
-                return [bin_width*0.1 + i*_get_null_bin_width(data_type, bin_info, num_hists, null_weights) + bin_info[-1] for i in range(num_hists)]
-        elif loc == 'order':
+                return [bin_width*0.1 + i*_get_null_bin_width() + bin_info[-1] for i in range(num_hists)]
+
+        elif null_at == 'order':
             raise Exception('null_at = order is not supported for numeric histograms.')
 
-    def _plot_null_xticks(loc, bins, xticks):
+    def _plot_null_xticks():
         """Given current xticks, plot appropriate NULL tick."""
-        bin_width = bins[1] - bins[0]
-        if loc == 'left':
-            plt.xticks([bins[0] - bin_width*0.5] + xticks[1:].tolist(), ['NULL'] + [int(i) for i in xticks[1:]])
-        elif loc == 'right':
-            plt.xticks(xticks[:-1].tolist() + [bins[-1] + bin_width*0.5], [int(i) for i in xticks[:-1]] + ['NULL'])
+        bin_width = bin_info[1] - bin_info[0]
+        if null_at == 'left':
+            plt.xticks([bin_info[0] - bin_width*0.5] + xticks[1:].tolist(),
+                       ['NULL'] + [int(i) for i in xticks[1:]])
+        elif null_at == 'right':
+            plt.xticks(xticks[:-1].tolist() + [bin_info[-1] + bin_width*0.5],
+                       [int(i) for i in xticks[:-1]] + ['NULL'])
 
-    def _get_xlim(loc, has_null, bins, null_bin_left, null_bin_height):
+    def _get_xlim():
         """Gets the x-limits for plotting."""
-        if loc == '' or not np.any(has_null):
+        if null_at == '' or not np.any(has_null):
             # If we do not want to plot nulls, or if there are no nulls
             # in the data, then set the limits as the regular histogram
             # limits
-            xlim_left = bins[0]
-            xlim_right = bins[-1]
+            xlim_left = bin_info[0]
+            xlim_right = bin_info[-1]
         else:
-            xlim_left = min(bins.tolist() + null_bin_left)
-            if loc == 'left':
-                xlim_right = max(bins.tolist() + null_bin_left)
-            elif loc == 'right':
-                xlim_right = max(bins.tolist() + null_bin_left) + null_bin_height
+            xlim_left = min(bin_info.tolist() + null_bin_left)
+            if null_at == 'left':
+                xlim_right = max(bin_info.tolist() + null_bin_left)
+            elif null_at == 'right':
+                xlim_right = max(bin_info.tolist() + null_bin_left) + null_bin_width
 
         return xlim_left, xlim_right
 
 
     df_list, labels = _listify(df_list, labels)
+
     # Joins in all the df_list DataFrames
     # Number of histograms we want to overlay
     num_hists = len(df_list)
 
     # If any of the columns are null
-    has_null = _check_for_nulls(df_list)
+    has_null = _check_for_nulls()
     _add_weights_column(df_list, normed)
 
     # Set color_palette
     sns.set_palette(color_palette)
-    null_weights = _get_null_weights(has_null, df_list)
+    null_weights = _get_null_weights()
 
     df_list = [df.dropna() for df in df_list]
     weights = [df.weights for df in df_list]
     bin_locs = [df.bin_loc for df in df_list]
 
-    data_type = _get_data_type(bin_locs)
+    data_type = _get_data_type()
 
     # Plot histograms and retrieve bins
-    bin_info = _plot_hist(data_type, bin_locs, weights, labels, n_bins, log)
+    bin_info = _plot_hist()
 
-    null_bin_width = _get_null_bin_width(data_type, bin_info, num_hists, null_weights)
-    null_bin_left = _get_null_bin_left(data_type, null_at, num_hists, bin_info, null_weights)
+    null_bin_width = _get_null_bin_width()
+    null_bin_left = _get_null_bin_left()
     xticks, _ = plt.xticks()
 
     # If we are plotting NULLS and there are some, plot them and change xticks
@@ -1087,12 +1099,12 @@ def plot_numeric_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
             plt.bar(null_bin_left[i], null_weights[i], null_bin_width,
                     color=color_palette[i], hatch='x')
         if data_type == 'numeric':
-            _plot_null_xticks(null_at, bin_info, xticks)
+            _plot_null_xticks()
         elif data_type == 'timestamp':
             pass
 
     # Set the x axis limits
-    plt.xlim(_get_xlim(null_at, has_null, bin_info, null_bin_left, null_bin_width))
+    plt.xlim(_get_xlim())
 
 
 def plot_date_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
