@@ -218,7 +218,7 @@ def compute_histogram_values(
 
     Parameters
     ----------
-    data : str or SQLAlchemy selectable
+    data : SQLAlchemy Alias
         The table we wish to compute a histogram with
     column_name : str
         Name of the column of interest
@@ -234,7 +234,7 @@ def compute_histogram_values(
         If True, print the resulting query
     """
 
-    def _check_for_input_errors(n_bins, bin_width):
+    def _check_for_input_errors():
         """Check to see if any inputs conflict and raise an error if
         there are issues.
         """
@@ -245,9 +245,12 @@ def compute_histogram_values(
             raise Exception('bin_width must be positive.')
         if n_bins is not None and bin_width is not None:
             raise Exception('n_bins and bin_width cannot both be specified.')
+        if data.c[column_name].type.__visit_name__ == 'null':
+            raise Exception('Column name data type is null. Cast it to its '
+                            'appropriate type.')
 
 
-    _check_for_input_errors(n_bins, bin_width)
+    _check_for_input_errors()
     is_category = _is_category_column(data, column_name)
     is_time_type = _is_time_type(data, column_name)
 
@@ -304,7 +307,7 @@ def compute_precision_recall_curve(data, y_true, y_score):
 
     Parameters
     ----------
-    data : str or SQLAlchemy selectable
+    data : SQLAlchemy Alias
         The table we wish to compute a histogram with
     y_true : str
         Name of the column that contains the true values
@@ -373,7 +376,7 @@ def compute_roc_curve(data, y_true, y_score):
 
     Parameters
     ----------
-    data : str or SQLAlchemy selectable
+    data : SQLAlchemy Alias
         The table we wish to compute a histogram with
     y_true : str
         Name of the column that contains the true values
@@ -448,7 +451,7 @@ def compute_scatterplot_values(
 
     Parameters
     ----------
-    data : str or SQLAlchemy selectable
+    data : SQLAlchemy Alias
         The table we wish to compute a histogram with
     column_name_x : str
         Name of one column of interest to be plotted
