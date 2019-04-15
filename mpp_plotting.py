@@ -823,16 +823,6 @@ def plot_categorical_hists(df_list, labels=[], log=False, normed=False,
         else:
             return 0.8/num_hists
 
-    def _plot_all_histograms(bin_left, bin_height, null_bin_left,
-                             null_bin_height, bin_width):
-        for i in range(num_hists):
-            # If there are any null bins, plot them
-            if len(null_bin_height[i]) > 0:
-                plt.bar(null_bin_left[i], null_bin_height[i], bin_width,
-                        hatch='x', color=color_palette[i])
-            plt.bar(bin_left[i], bin_height[i], bin_width,
-                    color=color_palette[i])
-
     def _plot_xticks(loc, bin_left, hist_df):
         """Plots the xtick labels."""
         # If there are any NULL categories
@@ -1049,7 +1039,7 @@ def plot_numeric_hists(df_list, labels=[], n_bins=25, log=False, normed=False,
                        [int(i) for i in xticks[:-1]] + ['NULL'])
 
     def _get_xlim():
-        """Gets the x-limits for plotting."""
+        """Gets the x-axis limits for plotting."""
         if null_at == '' or not np.any(has_null):
             # If we do not want to plot nulls, or if there are no nulls
             # in the data, then set the limits as the regular histogram
